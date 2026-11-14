@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#13242e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Resdagboken">
+<title>Resdagboken</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Overpass:wght@400;600;800&display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<link href="styles.css?v=1" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+</head>
+<body>
+<div id="app">
+  <div id="boot" class="center"><h1>Resdagboken</h1><p class="mute">Startar…</p></div>
+</div>
+<div id="ov" class="ov"><div id="box" class="box" role="dialog" aria-modal="true"></div></div>
+<div id="toast" class="toast" role="status"></div>
+<script type="module" src="app.js?v=1"></script>
+<script>
+  setTimeout(function () {
+    var b = document.getElementById('boot');
+    if (b && b.isConnected && !window.__appStarted) b.innerHTML = '<h1>Resdagboken</h1><p>Appen kunde inte starta. Kontrollera att du har nät första gången du öppnar den och ladda om sidan.</p>';
+  }, 12000);
+</script>
+</body>
+</html>
