@@ -1,13 +1,13 @@
 // Service worker: appen och kartbitar fungerar offline.
-const VERSION = 'v4';
+const VERSION = 'v5';
 const SHELL = 'shell-' + VERSION, LIBS = 'libs-' + VERSION, TILES = 'tiles-v1';
-const SHELL_FILES = ['./', './index.html', './styles.css?v=2', './app.js?v=4', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
+const SHELL_FILES = ['./', './index.html', './styles.css?v=2', './app.js?v=5', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
 const LIB_HOSTS = ['cdn.jsdelivr.net', 'fonts.googleapis.com', 'fonts.gstatic.com'];
 const TILE_HOSTS = ['tiles.openfreemap.org'];
 const MAX_TILES = 6000;
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(SHELL).then(c => c.addAll(SHELL_FILES)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(SHELL).then(c => c.addAll(SHELL_FILES.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => ![SHELL, LIBS, TILES].includes(k)).map(k => caches.delete(k)))).then(() => self.clients.claim()));

@@ -807,7 +807,21 @@ window.addEventListener('online', () => scheduleSync(200));
 window.addEventListener('offline', updateSyncLabel);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') scheduleSync(300); });
 setInterval(() => scheduleSync(0), 60000);
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+if ('serviceWorker' in navigator) {
+  // Ny version: kontrollera vid start och när appen kommer tillbaka från bakgrunden, ladda om automatiskt en gång.
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloading) return;
+    if (document.querySelector('#ov.show') || playing) { toast('Ny version av appen finns – den används nästa gång du öppnar appen'); return; }
+    reloading = true; location.reload();
+  });
+  navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(reg => {
+    const check = () => reg.update().catch(() => {});
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') check(); });
+    setInterval(check, 30 * 60 * 1000);
+  }).catch(() => {});
+}
 
 (async function boot() {
   try {
