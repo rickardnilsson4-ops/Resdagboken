@@ -717,14 +717,15 @@ function viewResa(main, t) {
       <div class="s">${sub}</div></div>
       <div class="open">${whoDiff(s.data.travelers, def)}</div></div>`;
   });
-  main.innerHTML = `<div id="mapslot"></div><div class="pad">
-    <div class="row playrow"><button class="pri" id="play" style="flex:1">▶ Spela upp</button><button id="rec" style="flex:1">● Spara video</button><div class="seg" id="speed" aria-label="Fart">${[[0.6, 'Lugn'], [1, 'Normal'], [2, 'Snabb']].map(([v, n]) => `<button data-s="${v}" class="${v === playSpeed ? 'on' : ''}">${n}</button>`).join('')}</div></div>
+  const used = Object.entries(MODES).filter(([k]) => L.some(l => l.mode === k));
+  const legend = used.length ? `<div class="legend">${used.map(([k, m]) => `<span><svg width="24" height="8" aria-hidden="true"><line x1="2" y1="4" x2="22" y2="4" stroke="${m.c}" stroke-width="${m.w}" stroke-linecap="round" ${m.d === 'dash' ? 'stroke-dasharray="7 4"' : m.d === 'dot' ? 'stroke-dasharray="0.1 7"' : ''}/></svg>${m.n}</span>`).join('')}</div>` : '';
+  main.innerHTML = `<div id="mapslot"></div>${legend}<div class="pad">
+    <div class="row playrow"><button class="pri" id="play" style="flex:1">▶\uFE0E Spela upp</button><button id="rec" style="flex:1">● Spara video</button><div class="seg" id="speed" aria-label="Fart">${[[0.6, 'Lugn'], [1, 'Normal'], [2, 'Snabb']].map(([v, n]) => `<button data-s="${v}" class="${v === playSpeed ? 'on' : ''}">${n}</button>`).join('')}</div></div>
     <div class="spread" style="margin-top:16px"><div><h3>Etapper</h3><div class="small mute">${st.length} platser · ${nf(km)} km${pendingRoutes ? ' · vissa vägar ritas när du har nät' : ''}</div></div><button class="pri" id="addany">+ Lägg till</button></div>
     ${persons().length > 1 && st.length ? `<div class="small mute" style="margin-top:6px;display:flex;gap:6px;align-items:center">Reste: ${personDots(def)} <span>– visas bara på rader där det skiljer sig</span></div>` : ''}
     ${st.length ? '' : '<div class="empty">Börja med platsen ni reste från. Tryck + Lägg till.</div>'}
     <div id="slist">${list}</div>
     ${st.length > 1 ? '<p class="small mute" style="margin:8px 0 0">Håll i ≡ och dra för att flytta en plats.</p>' : ''}
-    <details class="legend-d"><summary>Färgförklaring</summary><div class="legend">${Object.values(MODES).map(m => `<span><svg width="24" height="8" aria-hidden="true"><line x1="2" y1="4" x2="22" y2="4" stroke="${m.c}" stroke-width="${m.w}" stroke-linecap="round" ${m.d === 'dash' ? 'stroke-dasharray="7 4"' : m.d === 'dot' ? 'stroke-dasharray="0.1 7"' : ''}/></svg>${m.n}</span>`).join('')}</div></details>
     ${vids.length ? `<h3 style="margin-top:16px">Videor</h3>${vids.map(v => `<div class="spread card" style="padding:10px 14px;margin:8px 0 0"><span>${esc(new Date(v.data.created).toLocaleString('sv-SE', { dateStyle: 'medium', timeStyle: 'short' }))}${v.data.pending ? ' <span class="small mute">· laddas upp</span>' : ''}</span><button class="sm" data-vid="${v.id}">Visa</button></div>`).join('')}` : ''}
   </div>`;
   mountMap($('#mapslot'), t);
@@ -755,7 +756,7 @@ function pointAt(coords, cum, f) {
 function stopPlay() {
   if (!playing) return; playing.cancel = true;
   if (playing.rec && playing.rec.state !== 'inactive') playing.rec.stop();
-  playing = null; const p = $('#play'), r = $('#rec'); if (p) p.textContent = '▶ Spela upp'; if (r) r.textContent = '● Spara video';
+  playing = null; const p = $('#play'), r = $('#rec'); if (p) p.textContent = '▶\uFE0E Spela upp'; if (r) r.textContent = '● Spara video';
   const c = $('#cap'); if (c) c.style.display = 'none'; drawTrip(false);
 }
 async function play(t, speed, record) {
