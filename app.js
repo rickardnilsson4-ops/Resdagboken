@@ -747,7 +747,7 @@ function viewVarlden(main) {
         'circle-stroke-color': ['case', ['get', 'via'], '#6b7a80', '#ffffff'],
         'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 0, 0.5, 3, 0.8, 6, 1.5] } });
       wReady = true; paintWorld();
-      wmap.on('click', 'plc', e => { const p = e.features[0].properties; new maplibregl.Popup({ closeButton: false }).setLngLat(e.features[0].geometry.coordinates).setHTML(`<b>${esc(p.name)}</b><br><span style="font-size:12px">${esc(p.info)}</span>`).addTo(wmap); });
+      wmap.on('click', 'plc', e => { const p = e.features[0].properties; new maplibregl.Popup({ closeButton: false }).setLngLat(e.features[0].geometry.coordinates).setHTML(`<b>${esc(p.name)}</b><div style="font-size:12px;margin-top:4px;line-height:1.5">${p.info}</div>`).addTo(wmap); });
       wmap.on('mouseenter', 'plc', () => wmap.getCanvas().style.cursor = 'pointer');
       wmap.on('mouseleave', 'plc', () => wmap.getCanvas().style.cursor = '');
       wmap.on('click', 'cf', e => { if (wmap.queryRenderedFeatures(e.point, { layers: ['plc'] }).length) return; const p = e.features[0].properties; new maplibregl.Popup({ closeButton: false }).setLngLat(e.lngLat).setHTML(`<b>${flag(p.cc)} ${esc(cName(p.cc) || p.name)}</b>`).addTo(wmap); });
@@ -763,23 +763,27 @@ function paintWorld() {
 }
 function placePoints() {
   const P = new Map(), key = (lat, lon) => lat.toFixed(2) + ',' + lon.toFixed(2);
+  const allLabel = S.members.length > 2 ? 'Alla' : 'Båda';
   const add = (name, lat, lon, via, tr, trip) => {
     const k = key(lat, lon);
-    if (!P.has(k)) P.set(k, { name, lat, lon, all: false, ids: new Set(), visited: false, trips: new Set() });
-    const p = P.get(k); p.trips.add(trip);
-    if (via) return;
-    p.visited = true; p.name = name;
-    if (isAll(tr)) p.all = true; else tr.forEach(id => p.ids.add(id));
+    if (!P.has(k)) P.set(k, { name, lat, lon, all: false, ids: new Set(), visited: false, trips: new Map() });
+    const p = P.get(k);
+    if (!p.trips.has(trip)) p.trips.set(trip, { all: false, ids: new Set(), via: false, visited: false });
+    const t = p.trips.get(trip);
+    if (via) { t.via = true; return; }
+    p.visited = true; t.visited = true; p.name = name;
+    if (isAll(tr)) { p.all = true; t.all = true; } else tr.forEach(id => { p.ids.add(id); t.ids.add(id); });
   };
   for (const t of trips()) for (const s of stopsOf(t.id)) {
     if (hasPos(s)) add(s.data.name, s.data.lat, s.data.lon, false, s.data.travelers || [], t.data.title);
     for (const v of s.data.via || []) if (v.lat != null) add(v.name, v.lat, v.lon, true, [], t.data.title);
   }
+  const whoOf = x => !x.visited ? 'mellanlandning' : x.all || (S.members.length > 1 && S.members.every(m => x.ids.has(m.user_id))) ? allLabel : [...x.ids].map(memberName).join(' och ') || allLabel;
   return [...P.values()].map(p => {
     let cat = 'M';
     if (p.visited) { const idx = S.members.findIndex(m => p.ids.has(m.user_id)); cat = p.all || (S.members.length > 1 && S.members.every(m => p.ids.has(m.user_id))) || idx < 0 || p.ids.size > 1 ? 'B' : 'm' + idx; }
-    const who = cat === 'B' ? (S.members.length > 2 ? 'Alla' : 'Båda') : cat === 'M' ? 'Mellanlandning' : memberName(S.members[+cat.slice(1)].user_id);
-    return { type: 'Feature', properties: { name: p.name, via: cat === 'M', col: cat === 'M' ? '#ffffff' : catColor(cat), info: who + ' · ' + [...p.trips].join(', ') }, geometry: { type: 'Point', coordinates: [p.lon, p.lat] } };
+    const info = [...p.trips.entries()].map(([trip, x]) => `${esc(trip)}: <b>${esc(whoOf(x))}</b>`).join('<br>');
+    return { type: 'Feature', properties: { name: p.name, via: cat === 'M', col: cat === 'M' ? '#ffffff' : catColor(cat), info }, geometry: { type: 'Point', coordinates: [p.lon, p.lat] } };
   });
 }
 
