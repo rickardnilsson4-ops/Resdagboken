@@ -689,11 +689,21 @@ function entryDlg(t, e) {
 function visited() {
   const C = new Map(), V = new Map();
   for (const t of trips()) for (const s of stopsOf(t.id)) {
-    if (s.data.cc) { if (!C.has(s.data.cc)) C.set(s.data.cc, new Set()); travelersOf(s.data.travelers).forEach(id => C.get(s.data.cc).add(id)); }
-    for (const v of s.data.via || []) if (v.cc) V.set(v.cc, (V.get(v.cc) || 0) + 1);
+    if (s.data.cc) {
+      if (!C.has(s.data.cc)) C.set(s.data.cc, { all: false, ids: new Set() });
+      const v = C.get(s.data.cc);
+      if (isAll(s.data.travelers)) v.all = true; else s.data.travelers.forEach(id => v.ids.add(id));
+    }
+    for (const x of s.data.via || []) if (x.cc) V.set(x.cc, (V.get(x.cc) || 0) + 1);
   }
-  const cat = cc => { const set = C.get(cc); if (!set || !set.size) return V.has(cc) ? 'M' : null; if (S.members.every(m => set.has(m.user_id))) return 'B'; return set.size === 1 ? 'm' + Math.max(0, S.members.findIndex(m => set.has(m.user_id))) : 'B'; };
-  return { C, V, cat };
+  const has = (v, id) => v.all || v.ids.has(id);
+  const cat = cc => {
+    const v = C.get(cc); if (!v) return V.has(cc) ? 'M' : null;
+    if (v.all || (S.members.length > 1 && S.members.every(m => v.ids.has(m.user_id)))) return 'B';
+    const idx = S.members.findIndex(m => v.ids.has(m.user_id));
+    return v.ids.size === 1 && idx >= 0 ? 'm' + idx : 'B';
+  };
+  return { C, V, cat, has };
 }
 const catColor = c => c === 'B' ? BOTH_COLOR : c === 'M' ? '#ffffff' : c ? MEMBER_COLORS[+c.slice(1) % MEMBER_COLORS.length] : null;
 
@@ -705,9 +715,9 @@ async function loadCountries() {
   return countries = j;
 }
 function viewVarlden(main) {
-  const { C, V, cat } = visited();
-  const per = S.members.map((m, i) => ({ m, i, n: [...C.values()].filter(s => s.has(m.user_id)).length }));
-  const both = [...C.values()].filter(s => S.members.every(m => s.has(m.user_id))).length;
+  const { C, V, cat, has } = visited();
+  const per = S.members.map((m, i) => ({ m, i, n: [...C.values()].filter(v => has(v, m.user_id)).length }));
+  const both = [...C.keys()].filter(cc => cat(cc) === 'B').length;
   const groups = [['B', S.members.length > 2 ? 'Alla' : 'Båda']].concat(S.members.map((m, i) => ['m' + i, 'Bara ' + m.name])).concat([['M', 'Bara mellanlandning']]);
   const allCc = new Set([...C.keys(), ...V.keys()]);
   const byCat = k => [...allCc].filter(cc => cat(cc) === k).sort((a, b) => cName(a).localeCompare(cName(b), 'sv'));
