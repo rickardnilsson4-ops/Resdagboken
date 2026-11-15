@@ -71,7 +71,7 @@ function tripRange(t) { const ds = ofKind('stop').filter(s => s.data.trip === t.
 const curTrip = () => { const t = S.docs.get(S.trip); return live(t) ? t : trips()[0]; };
 const memberName = id => (S.members.find(m => m.user_id === id) || {}).name || '?';
 const memberColor = id => MEMBER_COLORS[Math.max(0, S.members.findIndex(m => m.user_id === id)) % MEMBER_COLORS.length];
-const isAll = tr => !tr || !tr.length || S.members.every(m => tr.includes(m.user_id));
+const isAll = tr => !tr || !tr.length;
 function whoBadge(tr) {
   if (isAll(tr)) return `<span class="who all">${S.members.length > 2 ? 'Alla' : 'Båda'}</span>`;
   return tr.map(id => `<span class="who" style="color:${memberColor(id)}">${esc(memberName(id))}</span>`).join(' ');
@@ -170,7 +170,7 @@ function simplify(c, tol = 0.0004) {
 
 /* ---------------- platssökning ---------------- */
 async function searchPlaces(q) {
-  const r = await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=8`);
+  const r = await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=8&lang=en`);
   if (!r.ok) throw new Error('search');
   const j = await r.json();
   return (j.features || []).map(f => {
@@ -180,7 +180,7 @@ async function searchPlaces(q) {
   });
 }
 async function reverseCountry(lat, lon) {
-  try { const r = await fetch(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lon}&limit=1`); const j = await r.json(); const p = j.features && j.features[0] && j.features[0].properties; return p ? { cc: (p.countrycode || '').toUpperCase(), name: p.name || p.city || '' } : null; } catch (e) { return null; }
+  try { const r = await fetch(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lon}&limit=1&lang=en`); const j = await r.json(); const p = j.features && j.features[0] && j.features[0].properties; return p ? { cc: (p.countrycode || '').toUpperCase(), name: p.name || p.city || '' } : null; } catch (e) { return null; }
 }
 function searchBox(el, onPick, placeholder) {
   el.innerHTML = `<input type="search" placeholder="${esc(placeholder || 'Sök ort, adress eller flygplats')}" autocomplete="off" enterkeyhint="search"><div class="results" hidden></div>`;
