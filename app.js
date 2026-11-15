@@ -484,7 +484,7 @@ async function uploadMedia() {
     } catch (e) { S.syncErr = 'Kunde inte ladda upp: ' + (e.message || e); }
   }
 }
-const docLabel = d => d.kind === 'trip' ? 'Resan ' + (d.data.title || '') : d.kind === 'stop' ? 'Platsen ' + (d.data.name || '') : d.kind === 'entry' ? 'Inlägget ' + (d.data.title || 'utan rubrik') : d.kind === 'person' ? 'Personen ' + (d.data.name || '') : d.kind === 'home' ? 'Hem' : 'En uppgift';
+const docLabel = d => d.kind === 'trip' ? 'Resan ' + (d.data.title || '') : d.kind === 'stop' ? 'Platsen ' + (d.data.name || '') : d.kind === 'entry' ? 'Inlägget ' + (d.data.title || 'utan rubrik') : d.kind === 'person' ? 'Personen ' + (d.data.name || '') : d.kind === 'home' ? 'Hem' : d.kind === 'video' ? 'Video ' + new Date(d.data.created).toLocaleString('sv-SE', { dateStyle: 'medium', timeStyle: 'short' }) : 'En uppgift';
 async function checkConflicts(list) {
   if (!list.length) return;
   for (let i = 0; i < list.length; i += 100) {
@@ -837,7 +837,7 @@ function viewResa(main, t) {
     ${st.length ? '' : '<div class="empty">Börja med platsen ni reste från. Tryck + Lägg till.</div>'}
     <div id="slist">${list}</div>
     ${st.length > 1 ? '<p class="small mute" style="margin:8px 0 0">Håll i ≡ och dra för att flytta en plats.</p>' : ''}
-    ${vids.length ? `<h3 style="margin-top:16px">Videor</h3>${vids.map(v => `<div class="spread card" style="padding:10px 14px;margin:8px 0 0"><span>${esc(new Date(v.data.created).toLocaleString('sv-SE', { dateStyle: 'medium', timeStyle: 'short' }))}${v.data.pending ? ' <span class="small mute">· laddas upp</span>' : ''}</span><button class="sm" data-vid="${v.id}">Visa</button></div>`).join('')}` : ''}
+    ${vids.length ? `<h3 style="margin-top:16px">Videor</h3>${vids.map(v => `<div class="spread card" style="padding:10px 14px;margin:8px 0 0"><span>${esc(new Date(v.data.created).toLocaleString('sv-SE', { dateStyle: 'medium', timeStyle: 'short' }))}${v.data.pending ? ' <span class="small mute">· laddas upp</span>' : ''}</span><span class="row" style="gap:6px"><button class="sm" data-vid="${v.id}">Visa</button><button class="sm" data-vdel="${v.id}">Ta bort</button></span></div>`).join('')}` : ''}
   </div>`;
   mountMap($('#mapslot'), t);
   if (playing) { $(playing.rec ? '#rec' : '#play').textContent = 'Stoppa'; }
@@ -846,6 +846,7 @@ function viewResa(main, t) {
   $('#rec').onclick = () => playing ? stopPlay() : play(t, playSpeed, true);
   $('#addany').onclick = () => addMenu(t);
   main.querySelectorAll('[data-vid]').forEach(b => b.onclick = () => showVideo(b.dataset.vid));
+  main.querySelectorAll('[data-vdel]').forEach(b => b.onclick = () => confirmDlg('Ta bort videon?', 'Du kan ångra direkt efteråt eller återställa den under Borttaget.', 'Ta bort', () => removeWithUndo(b.dataset.vdel, [], 'Videon är borttagen')));
   main.querySelectorAll('.srow .open').forEach(b => b.onclick = () => stopDlg(t, S.docs.get(b.closest('.srow').dataset.s)));
   if (window.Sortable && st.length > 1) {
     Sortable.create($('#slist'), {
