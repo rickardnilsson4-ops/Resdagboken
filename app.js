@@ -76,6 +76,7 @@ function whoBadge(tr) {
   if (isAll(tr)) return `<span class="who all">${S.members.length > 2 ? 'Alla' : 'Båda'}</span>`;
   return tr.map(id => `<span class="who" style="color:${memberColor(id)}">${esc(memberName(id))}</span>`).join(' ');
 }
+const homeOf = () => { const d = S.user && S.docs.get(S.user.id); return live(d) && d.kind === 'home' && d.data.lat != null ? d.data : null; };
 const travelersOf = tr => isAll(tr) ? S.members.map(m => m.user_id) : tr;
 
 async function saveDoc(kind, data, id) {
@@ -395,11 +396,13 @@ const noTrip = () => `<div class="pad"><div class="empty"><p>Ingen resa ännu.</
 function tripDlg(t) {
   const b = openDlg(`<h2>${t ? 'Ändra resa' : 'Ny resa'}</h2><form id="f">
     <label for="tt">Namn</label><input id="tt" required value="${esc(t ? t.data.title : '')}" placeholder="t.ex. Rivieran 2027">
+    ${!t && homeOf() ? `<label style="display:flex;gap:10px;align-items:center;font-weight:600"><input type="checkbox" id="th" checked style="width:22px;min-height:22px"> Resan startar hemma i ${esc(homeOf().name)}</label><label for="tdd">Avresedatum</label><input id="tdd" type="date" value="${today()}">` : ''}
     <label for="ta">Länk till fotoalbum (valfritt)</label><input id="ta" type="url" value="${esc(t ? t.data.album || '' : '')}" placeholder="Delad länk från Google Foto eller iCloud">
     <div class="row end" style="margin-top:16px">${t ? '<button type="button" id="del">Ta bort</button>' : ''}<button type="button" data-close>Avbryt</button><button class="pri">Spara</button></div></form>`);
   $('#f', b).onsubmit = async e => {
     e.preventDefault(); const title = $('#tt').value.trim(); if (!title) return;
     const d = await saveDoc('trip', { title, album: $('#ta').value.trim(), created: t ? t.data.created : new Date().toISOString() }, t && t.id);
+    if (!t && $('#th') && $('#th').checked) { const h = homeOf(); await saveDoc('stop', { trip: d.id, name: h.name, sub: h.sub || '', lat: h.lat, lon: h.lon, cc: h.cc, date: $('#tdd').value, mode: '', travelers: [], via: [], seq: 1 }); }
     S.trip = d.id; idbPut('kv', d.id, 'trip'); closeDlg(); if (!t) location.hash = 'etapper'; render();
   };
   if (t) $('#del').onclick = () => confirmDlg(`Ta bort ”${t.data.title}”?`, 'Resan, dess platser och inlägg tas bort för er båda.', 'Ta bort', async () => {
@@ -562,30 +565,115 @@ function viewEtapper(main, t) {
   if (!t) { main.innerHTML = noTrip(); return; }
   const st = stopsOf(t.id);
   const L = legs(t), byStop = new Map(L.map(l => [l.b.id, l]));
-  let html = `<div class="pad"><div class="spread"><p class="small mute" style="margin:0">${st.length} platser · ${L.length} etapper</p><button class="pri sm" id="add">+ Ny plats</button></div>`;
+  const home = homeOf(), lastSt = st[st.length - 1];
+  const homeBtn = home && lastSt && !(hasPos(lastSt) && hav(pos(lastSt), [home.lon, home.lat]) < 5);
+  let html = `<div class="pad"><div class="spread"><p class="small mute" style="margin:0">${st.length} platser · ${L.length} etapper</p><div class="row">${homeBtn ? '<button class="sm" id="addhome">+ Hemresa</button>' : ''}<button class="sm" id="addfl">+ Flyg</button><button class="pri sm" id="add">+ Ny plats</button></div></div>`;
   if (!st.length) html += `<div class="empty">Börja med platsen ni reste från, till exempel hemorten.</div>`;
+  else html += `<p class="small mute" style="margin:6px 0 0">Håll i ≡ och dra för att flytta en plats.</p>`;
+  html += '<div id="slist">';
   let lastDay = null;
   st.forEach((s, i) => {
     const day = s.data.date || '';
     if (day !== lastDay) { html += `<div class="day">${day ? esc(fmtD(day)) : 'Utan datum'}</div>`; lastDay = day; }
     const l = byStop.get(s.id), m = MODES[s.data.mode] || MODES.bil;
     const via = (s.data.via || []).map(v => v.name).join(', ');
-    html += `<button class="leg" data-s="${s.id}"><div class="bar" style="background:${i ? m.c : '#13242e'}"></div>
-      <div><div class="t">${i ? `${esc(st[i - 1].data.name)} → ` : ''}${esc(s.data.name)} ${flag(s.data.cc)}</div>
+    html += `<div class="leg srow" data-s="${s.id}"><span class="grip" aria-label="Dra för att flytta" role="button" tabindex="-1">≡</span><div class="bar" style="background:${i ? m.c : '#13242e'}"></div>
+      <div class="open"><div class="t">${i ? `${esc(st[i - 1].data.name)} → ` : ''}${esc(s.data.name)} ${flag(s.data.cc)}</div>
       <div class="s">${i ? esc(m.n) : 'Start'}${l ? ' · ' + nf(l.km) + ' km' : ''}${via ? ` · <span class="via">mellanlandning ${esc(via)}</span>` : ''}${!hasPos(s) ? ' · <b>saknar position</b>' : ''}</div></div>
-      <div>${whoBadge(s.data.travelers)}</div></button>`;
+      <div class="open">${whoBadge(s.data.travelers)}</div></div>`;
   });
-  main.innerHTML = html + '</div>';
+  main.innerHTML = html + '</div></div>';
   $('#add').onclick = () => stopDlg(t, null);
-  main.querySelectorAll('[data-s]').forEach(b => b.onclick = () => stopDlg(t, S.docs.get(b.dataset.s)));
+  $('#addfl').onclick = () => flightDlg(t);
+  if ($('#addhome')) $('#addhome').onclick = () => stopDlg(t, null, home);
+  main.querySelectorAll('.srow .open').forEach(b => b.onclick = () => stopDlg(t, S.docs.get(b.closest('.srow').dataset.s)));
+  if (window.Sortable && st.length > 1) {
+    Sortable.create($('#slist'), {
+      handle: '.grip', draggable: '.srow', animation: 150, ghostClass: 'drag-ghost', forceFallback: true, fallbackTolerance: 3,
+      onEnd: async () => {
+        const ids = [...document.querySelectorAll('#slist .srow')].map(e => e.dataset.s);
+        let changed = false;
+        for (const [i, id] of ids.entries()) { const d = S.docs.get(id); if (d && d.data.seq !== i + 1) { await saveDoc('stop', { seq: i + 1 }, id); changed = true; } }
+        if (changed) { toast('Ordningen är sparad'); render(); }
+      }
+    });
+  }
 }
-function stopDlg(t, s) {
+
+/* ---------------- flyg via flygnummer ---------------- */
+const AIRLINE_ICAO = { SK: 'SAS', DY: 'NOZ', D8: 'NSZ', DK: 'VKG', LH: 'DLH', QR: 'QTR', EK: 'UAE', EY: 'ETD', AI: 'AIC', '6E': 'IGO', UK: 'VTI', BA: 'BAW', AF: 'AFR', KL: 'KLM', LX: 'SWR', OS: 'AUA', SN: 'BEL', AY: 'FIN', TK: 'THY', LO: 'LOT', FR: 'RYR', U2: 'EZY', W6: 'WZZ', IB: 'IBE', VY: 'VLG', TP: 'TAP', AZ: 'ITY', EI: 'EIN', UA: 'UAL', DL: 'DAL', AA: 'AAL', AC: 'ACA', SQ: 'SIA', TG: 'THA', CX: 'CPA', NH: 'ANA', JL: 'JAL', BT: 'BTI', A3: 'AEE', LG: 'LGL', WF: 'WIF', HV: 'TRA', PC: 'PGT', SV: 'SVA', MS: 'MSR', ET: 'ETH', G9: 'ABY', FZ: 'FDB', WY: 'OMA', GF: 'GFA', KU: 'KAC', '9W': 'JAI', SG: 'SEJ', QF: 'QFA', NZ: 'ANZ', B6: 'JBU', WN: 'SWA', AS: 'ASA', F9: 'FFT', NK: 'NKS' };
+async function lookupFlight(raw) {
+  const code = raw.toUpperCase().replace(/[\s-]/g, '');
+  const m = code.match(/^([A-Z0-9]{2})(\d{1,4}[A-Z]?)$/), tries = [code];
+  if (m && AIRLINE_ICAO[m[1]]) tries.push(AIRLINE_ICAO[m[1]] + m[2]);
+  for (const c of tries) {
+    try {
+      const r = await fetch(`https://api.adsbdb.com/v0/callsign/${encodeURIComponent(c)}`);
+      if (!r.ok) continue;
+      const j = await r.json(), fr = j && j.response && j.response.flightroute;
+      if (fr && fr.origin && fr.destination) {
+        const ap = a => ({ name: `${a.municipality || a.name} (${a.iata_code || a.icao_code})`, sub: a.name, lat: +(+a.latitude).toFixed(5), lon: +(+a.longitude).toFixed(5), cc: (a.country_iso_name || '').toUpperCase() });
+        return { code, airline: fr.airline && fr.airline.name, from: ap(fr.origin), to: ap(fr.destination) };
+      }
+    } catch (e) {}
+  }
+  return null;
+}
+function flightDlg(t) {
+  const st = stopsOf(t.id), last = st[st.length - 1];
+  let found = [], who = [];
+  const b = openDlg(`<h2>Lägg till flyg</h2>
+    <label for="fc">Flygnummer i den ordning du flög</label><input id="fc" placeholder="t.ex. SK1415, QR160" autocapitalize="characters" autocomplete="off">
+    <p class="small mute" style="margin:4px 0 0">Separera med komma. Flygen hämtas från en öppen flygdatabas – kontrollera att sträckan stämmer.</p>
+    <label for="fd">Datum</label><input id="fd" type="date" value="${esc(last ? last.data.date || today() : today())}">
+    <label>Vem reste?</label><div class="seg" id="who"><button type="button" data-w="all" class="on">${S.members.length > 2 ? 'Alla' : 'Båda'}</button>${S.members.map(m => `<button type="button" data-w="${m.user_id}">${esc(m.name)}</button>`).join('')}</div>
+    <label style="display:flex;gap:10px;align-items:center;font-weight:600"><input type="checkbox" id="fv" checked style="width:22px;min-height:22px"> Byten räknas som mellanlandning (en etapp)</label>
+    <div id="fres"></div>
+    <div class="row end" style="margin-top:16px"><button type="button" data-close>Avbryt</button><button type="button" id="fget">Hämta flyg</button><button class="pri" id="fok" disabled>Lägg till</button></div>`);
+  $('#who').onclick = e => { const x = e.target.closest('[data-w]'); if (!x) return; who = x.dataset.w === 'all' ? [] : [x.dataset.w]; $('#who').querySelectorAll('button').forEach(y => y.classList.toggle('on', y === x)); };
+  const show = () => {
+    if (!found.length) return;
+    const near = last && hasPos(last) && found[0].f && hav(pos(last), [found[0].f.from.lon, found[0].f.from.lat]) < 60;
+    $('#fres').innerHTML = `<div class="card" style="margin-top:12px">${found.map(x => x.f ? `<div style="padding:4px 0"><b>${esc(x.code)}</b> ${esc(x.f.from.name)} → ${esc(x.f.to.name)}${x.f.airline ? `<div class="small mute">${esc(x.f.airline)}</div>` : ''}</div>` : `<div style="padding:4px 0;color:#b00020"><b>${esc(x.code)}</b> hittades inte – lägg till den sträckan med + Ny plats</div>`).join('')}
+      ${found[0].f && !near ? `<p class="small mute" style="margin:6px 0 0">${esc(found[0].f.from.name)} läggs till som plats före flyget${st.length ? ' (färdmedel dit: egen bil – ändra vid behov)' : ' (startplats)'}.</p>` : ''}</div>`;
+    $('#fok').disabled = !found.some(x => x.f);
+  };
+  $('#fget').onclick = async () => {
+    const codes = $('#fc').value.split(/[,;\n]+/).map(x => x.trim()).filter(Boolean);
+    if (!codes.length) return toast('Skriv minst ett flygnummer');
+    if (!navigator.onLine) return toast('Det krävs nät för att hämta flyg');
+    $('#fget').disabled = true; $('#fres').innerHTML = '<p class="small mute">Hämtar…</p>';
+    found = [];
+    for (const c of codes) found.push({ code: c.toUpperCase(), f: await lookupFlight(c) });
+    $('#fget').disabled = false; show();
+  };
+  $('#fok').onclick = async () => {
+    const ok = found.filter(x => x.f).map(x => x.f); if (!ok.length) return;
+    const date = $('#fd').value, viaMode = $('#fv').checked;
+    let seq = (last ? (last.data.seq || 0) : 0) + 1, prev = last;
+    const addStop = async (p, mode, via) => { const d = await saveDoc('stop', { trip: t.id, name: p.name, sub: p.sub, lat: p.lat, lon: p.lon, cc: p.cc, date, mode, travelers: who, via: via || [], seq: seq++ }); prev = d; };
+    if (!(prev && hasPos(prev) && hav(pos(prev), [ok[0].from.lon, ok[0].from.lat]) < 60)) await addStop(ok[0].from, prev ? 'bil' : '');
+    if (viaMode) {
+      const via = ok.slice(0, -1).map(f => ({ name: f.to.name, lat: f.to.lat, lon: f.to.lon, cc: f.to.cc }));
+      await addStop(ok[ok.length - 1].to, 'flyg', via);
+    } else {
+      for (const [i, f] of ok.entries()) {
+        if (i && hav([ok[i - 1].to.lon, ok[i - 1].to.lat], [f.from.lon, f.from.lat]) > 60) await addStop(f.from, 'bil');
+        await addStop(f.to, 'flyg');
+      }
+    }
+    closeDlg(); toast('Flygen är tillagda'); render();
+  };
+}
+function stopDlg(t, s, preset) {
   const st = stopsOf(t.id), isFirst = s ? st[0] && st[0].id === s.id : !st.length;
   const last = st[st.length - 1];
   const D = s ? JSON.parse(JSON.stringify(s.data)) : { trip: t.id, name: '', date: last ? last.data.date : today(), mode: 'bil', travelers: [], via: [], seq: (last ? (last.data.seq || 0) : 0) + 1 };
+  if (preset && !s) Object.assign(D, { name: preset.name, sub: preset.sub || '', lat: preset.lat, lon: preset.lon, cc: preset.cc });
   if (!D.via) D.via = []; if (!D.travelers) D.travelers = [];
+  const home = homeOf();
   const b = openDlg(`<h2>${s ? 'Ändra plats' : isFirst ? 'Startplats' : 'Ny plats'}</h2>
-    <label>Plats</label><div id="sb"></div><div id="picked" class="note"${D.lat != null ? '' : ' hidden'}></div>
+    <label>Plats</label><div id="sb"></div>${home ? `<button type="button" class="sm" id="usehome" style="margin-top:6px">Hem: ${esc(home.name)}</button>` : ''}<div id="picked" class="note"${D.lat != null ? '' : ' hidden'}></div>
     ${isFirst ? '' : `<label>Färdmedel hit</label><div class="chips" id="modes">${Object.entries(MODES).map(([k, m]) => `<button type="button" class="chip" data-m="${k}">${m.n}</button>`).join('')}</div>
     <div id="viabox" hidden><label>Mellanlandningar</label><div id="vias"></div><div id="vsb" style="margin-top:6px"></div><p class="small mute" style="margin:4px 0 0">Räknas inte som besökt land.</p></div>`}
     <label>Vem reste?</label><div class="seg" id="who"><button type="button" data-w="all">${S.members.length > 2 ? 'Alla' : 'Båda'}</button>${S.members.map(m => `<button type="button" data-w="${m.user_id}">${esc(m.name)}</button>`).join('')}</div>
@@ -594,6 +682,7 @@ function stopDlg(t, s) {
   const showPicked = () => { const p = $('#picked'); p.hidden = D.lat == null; p.innerHTML = D.lat != null ? `${flag(D.cc)} <b>${esc(D.name)}</b> ${D.sub ? '· ' + esc(D.sub) : ''}` : ''; };
   const inp = searchBox($('#sb'), p => { Object.assign(D, { name: p.name, sub: p.sub, lat: p.lat, lon: p.lon, cc: p.cc }); showPicked(); });
   inp.value = D.name || ''; showPicked();
+  if ($('#usehome')) $('#usehome').onclick = () => { Object.assign(D, { name: home.name, sub: home.sub || '', lat: home.lat, lon: home.lon, cc: home.cc }); inp.value = home.name; showPicked(); };
   const renderModes = () => { if (!$('#modes')) return; $('#modes').querySelectorAll('[data-m]').forEach(x => { const on = x.dataset.m === D.mode; x.classList.toggle('on', on); x.style.background = on ? MODES[x.dataset.m].c : ''; x.style.borderColor = on ? MODES[x.dataset.m].c : ''; }); $('#viabox').hidden = D.mode !== 'flyg'; };
   const renderVias = () => { if (!$('#vias')) return; $('#vias').innerHTML = D.via.map((v, i) => `<div class="spread" style="padding:4px 0"><span>${flag(v.cc)} ${esc(v.name)}</span><button type="button" class="sm" data-rv="${i}" aria-label="Ta bort">✕</button></div>`).join(''); };
   const renderWho = () => $('#who').querySelectorAll('[data-w]').forEach(x => x.classList.toggle('on', x.dataset.w === 'all' ? isAll(D.travelers) : !isAll(D.travelers) && D.travelers.includes(x.dataset.w)));
@@ -827,6 +916,7 @@ function viewMer(main) {
   const me = S.members.find(m => m.user_id === S.user.id);
   main.innerHTML = `<div class="pad">
     <section class="card"><h3>Ditt namn</h3><div class="row" style="margin-top:8px"><input id="myname" value="${esc(me ? me.name : '')}" style="flex:1"><button id="savename">Spara</button></div></section>
+    <section class="card"><h3>Hem</h3><p class="small mute" style="margin:4px 0 8px">Används som startplats för nya resor och för knappen Hemresa.</p>${homeOf() ? `<div class="note" style="margin:0 0 8px">${flag(homeOf().cc)} <b>${esc(homeOf().name)}</b></div>` : ''}<div id="homesb"></div></section>
     <section class="card"><h3>Vi som delar dagboken</h3>${S.members.map(m => `<div style="padding:4px 0"><span class="who" style="color:${memberColor(m.user_id)}">${esc(m.name)}</span></div>`).join('')}
       <p class="small mute">Den du vill dela med installerar appen, skapar ett konto och väljer <b>Gå med med kod</b> med koden:</p>
       <div class="row"><b style="font-size:24px;letter-spacing:3px">${esc(S.joinCode || '…')}</b><button class="sm" id="cp">Kopiera</button></div></section>
@@ -834,6 +924,7 @@ function viewMer(main) {
     <section class="card"><h3>Säkerhetskopia</h3><p class="small mute" style="margin:6px 0">All text och alla platser som en fil. Bilderna ligger kvar i molnet.</p><button id="exp">Ladda ner kopia</button></section>
     <button id="lo" style="width:100%">Logga ut</button>
     <p class="small mute" style="margin-top:16px">Karta © OpenFreeMap, OpenMapTiles, OpenStreetMap-bidragsgivare. Sökning: Photon. Rutter: FOSSGIS OSRM och BRouter.</p></div>`;
+  searchBox($('#homesb'), async p => { await saveDoc('home', { name: p.name, sub: p.sub, lat: p.lat, lon: p.lon, cc: p.cc }, S.user.id); toast('Hem är sparat'); render(); }, homeOf() ? 'Byt hem – sök ort eller adress' : 'Sök din hemort eller adress');
   $('#savename').onclick = async () => { const n = $('#myname').value.trim(); if (!n) return; const { error } = await sb.from('members').update({ name: n }).eq('group_id', S.group).eq('user_id', S.user.id); if (error) return toast(navigator.onLine ? error.message : 'Kräver nät'); await loadMembers(); toast('Sparat'); render(); };
   $('#cp').onclick = async () => { try { await navigator.clipboard.writeText(S.joinCode); toast('Koden är kopierad'); } catch (e) { toast(S.joinCode); } };
   $('#syncnow').onclick = async () => { await sync(); render(); };
