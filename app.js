@@ -385,6 +385,7 @@ function render() {
   if ($('#tedit')) $('#tedit').onclick = () => tripDlg(curTrip());
   const main = $('#main');
   if (S.view !== 'karta') detachMap();
+  if (S.view !== 'varlden' && wmap) { try { wmap.remove(); } catch (e) {} wmap = null; wReady = false; }
   ({ karta: viewKarta, etapper: viewEtapper, dagbok: viewDagbok, varlden: viewVarlden, topp: viewTopp, mer: viewMer })[S.view](main, t);
   hydrate(main);
 }
@@ -410,8 +411,7 @@ function tripDlg(t) {
 /* ---------------- karta ---------------- */
 let map, mapReady = false, photoMarkers = [], playing = null, mapHolder;
 function ensureMap() {
-  if (!mapHolder) { mapHolder = document.createElement('div'); mapHolder.id = 'mapbox'; mapHolder.innerHTML = '<div id="map"></div><div id="cap"></div>'; }
-  if (map || !window.maplibregl) return;
+  if (map || !window.maplibregl || !mapHolder) return;
   try {
     map = new maplibregl.Map({ container: mapHolder.querySelector('#map'), style: STYLE_URL, center: [12, 50], zoom: 3, attributionControl: { compact: true }, preserveDrawingBuffer: true });
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
@@ -432,7 +432,7 @@ function ensureMap() {
     map.on('error', e => { if (e && e.error && /Failed to fetch|NetworkError/.test(String(e.error.message))) return; });
   } catch (e) { map = null; }
 }
-function detachMap() { stopPlay(); if (mapHolder && mapHolder.parentNode) mapHolder.remove(); }
+function detachMap() { stopPlay(); photoMarkers.forEach(m => m.remove()); photoMarkers = []; if (map) { try { map.remove(); } catch (e) {} } map = null; mapReady = false; if (mapHolder && mapHolder.parentNode) mapHolder.remove(); mapHolder = null; }
 const fc = f => ({ type: 'FeatureCollection', features: f });
 function legFeature(L, coords) { return { type: 'Feature', properties: { c: L.m.c, w: L.m.w, d: L.m.d }, geometry: { type: 'LineString', coordinates: coords } }; }
 function stopFeatures(t) {
@@ -473,10 +473,11 @@ function viewKarta(main, t) {
     <p class="small mute">${L.length} etapper · ${nf(L.reduce((s, l) => s + l.km, 0))} km${L.some(l => !l.routed && ['car', 'bike', 'rail'].includes(l.m.r)) ? ' · vissa rutter räknas ut när du är uppkopplad' : ''}</p>
     ${vids.length ? `<h3 style="margin-top:12px">Videor</h3>${vids.map(v => `<div class="spread card" style="padding:10px 14px;margin:8px 0 0"><span>${esc(new Date(v.data.created).toLocaleString('sv-SE', { dateStyle: 'medium', timeStyle: 'short' }))}${v.data.pending ? ' <span class="small mute">· laddas upp</span>' : ''}</span><button class="sm" data-vid="${v.id}">Visa</button></div>`).join('')}` : ''}
   </div>`;
-  ensureMap();
+  detachMap();
+  mapHolder = document.createElement('div'); mapHolder.id = 'mapbox'; mapHolder.innerHTML = '<div id="map"></div><div id="cap"></div>';
   $('#mapslot').replaceWith(mapHolder);
   if (!window.maplibregl) mapHolder.innerHTML = '<div class="mapmsg">Kartan kunde inte laddas. Den behöver nät första gången.</div>';
-  if (map) { map.resize(); drawTrip(true); }
+  else ensureMap();
   let speed = 1;
   $('#speed').onclick = e => { const b = e.target.closest('[data-s]'); if (!b) return; speed = +b.dataset.s; $('#speed').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); if (playing) playing.speed = speed; };
   $('#play').onclick = () => playing ? stopPlay() : play(t, speed, false);
@@ -726,7 +727,8 @@ function viewVarlden(main) {
     <div id="wmapbox" style="margin-top:12px"><div id="wmap"></div></div>
     <div style="margin-top:12px">${groups.map(([k, label]) => { const l = byCat(k); return l.length ? `<div class="cl"><i style="background:${catColor(k)};${k === 'M' ? 'border:2px dashed #6b7a80' : ''}"></i><span><b>${esc(label)} (${l.length}):</b> ${l.map(cc => `${flag(cc)} ${esc(cName(cc))}`).join(', ')}</span></div>` : ''; }).join('') || '<div class="empty">Lägg till platser i en resa så färgas länderna här.</div>'}</div></div>`;
   if (!window.maplibregl) { $('#wmapbox').innerHTML = '<div class="mapmsg">Kartan behöver nät första gången.</div>'; return; }
-  if (!wHolder) {
+  if (wmap) { try { wmap.remove(); } catch (e) {} wmap = null; wReady = false; }
+  {
     wHolder = $('#wmap');
     wmap = new maplibregl.Map({ container: wHolder, style: { version: 8, sources: {}, layers: [{ id: 'bg', type: 'background', paint: { 'background-color': '#bfe3ee' } }] }, center: [15, 35], zoom: 0.6, attributionControl: false, renderWorldCopies: false });
     wmap.on('load', async () => {
@@ -737,8 +739,6 @@ function viewVarlden(main) {
       wReady = true; paintWorld();
       wmap.on('click', 'cf', e => { const p = e.features[0].properties; new maplibregl.Popup({ closeButton: false }).setLngLat(e.lngLat).setHTML(`<b>${flag(p.cc)} ${esc(cName(p.cc) || p.name)}</b>`).addTo(wmap); });
     });
-  } else {
-    $('#wmap').replaceWith(wHolder); wmap.resize(); paintWorld();
   }
 }
 function paintWorld() {
