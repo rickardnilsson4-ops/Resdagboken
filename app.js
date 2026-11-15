@@ -883,18 +883,21 @@ function visitData() {
   return { C, V };
 }
 function catFor(set, viaSet, sel) {
-  const n = set ? sel.filter(id => set.has(id)).length : 0;
+  const vis = set ? sel.filter(id => set.has(id)) : [], n = vis.length;
   if (!n) return viaSet && sel.some(id => viaSet.has(id)) ? 'M' : null;
   if (sel.length === 1) return 'p:' + sel[0];
   if (n === sel.length) return 'B';
-  if (sel.length === 2) return 'p:' + sel.find(id => set.has(id));
+  if (n === 1) return 'p:' + vis[0];
+  if (sel.length <= 5) return 'X:' + vis.join(',');
   return 'S';
 }
+const stripeCss = ids => `repeating-linear-gradient(45deg,${ids.map((id, i) => `${personColor(id)} ${i * 4}px ${(i + 1) * 4}px`).join(',')})`;
 const SOME_COLOR = '#8cc3c6';
-const catColor = c => c === 'B' ? BOTH_COLOR : c === 'S' ? SOME_COLOR : c === 'M' ? '#ffffff' : c && c.startsWith('p:') ? personColor(c.slice(2)) : null;
+const catColor = c => c === 'B' ? BOTH_COLOR : c === 'S' ? SOME_COLOR : c === 'M' ? '#ffffff' : c && c.startsWith('p:') ? personColor(c.slice(2)) : c && c.startsWith('X:') ? personColor(c.slice(2).split(',')[0]) : null;
 function catLabel(c, sel) {
   if (c === 'B') return sel.length === 2 ? sel.map(personName).join(' och ') : sel.length === allIds().length ? 'Alla' : 'Alla valda';
   if (c === 'S') return 'Några av de valda';
+  if (c === 'X') return 'Några av er tillsammans';
   if (c === 'M') return 'Bara mellanlandning';
   return (sel.length === 1 ? '' : 'Bara ') + personName(c.slice(2));
 }
@@ -915,15 +918,15 @@ function viewVarlden(main) {
   const cat = cc => catFor(C.get(cc), V.get(cc), sel);
   const allCc = new Set([...C.keys(), ...V.keys()]);
   const kp = [];
-  if (sel.length > 1) kp.push({ n: [...C.values()].filter(st => sel.every(id => st.has(id))).length, label: sel.length === 2 ? 'Tillsammans' : sel.length === allIds().length ? 'Alla tillsammans' : 'Alla valda', col: BOTH_COLOR });
+  if (sel.length > 1) kp.push({ n: [...C.values()].filter(st => sel.every(id => st.has(id))).length, label: sel.length === 2 ? 'Tillsammans' : sel.length === allIds().length ? 'Alla ihop' : 'Alla valda', col: BOTH_COLOR });
   sel.forEach(id => kp.push({ n: [...C.values()].filter(st => st.has(id)).length, label: personName(id) + (sel.length > 1 ? ' totalt' : ''), col: personColor(id) }));
-  const cats = sel.length === 1 ? ['p:' + sel[0], 'M'] : sel.length === 2 ? ['B', 'p:' + sel[0], 'p:' + sel[1], 'M'] : ['B', 'S', 'M'];
-  const byCat = k => [...allCc].filter(cc => cat(cc) === k).sort((x, y) => cName(x).localeCompare(cName(y), 'sv'));
-  const who = cc => cat(cc) === 'S' ? ` <span class="small mute">(${sel.filter(id => C.get(cc).has(id)).map(personName).map(esc).join(', ')})</span>` : '';
+  const cats = sel.length === 1 ? ['p:' + sel[0], 'M'] : sel.length === 2 ? ['B', 'p:' + sel[0], 'p:' + sel[1], 'M'] : sel.length <= 5 ? ['B', ...sel.map(id => 'p:' + id), 'X', 'M'] : ['B', 'S', 'M'];
+  const byCat = k => [...allCc].filter(cc => k === 'X' ? (cat(cc) || '').startsWith('X:') : cat(cc) === k).sort((x, y) => cName(x).localeCompare(cName(y), 'sv'));
+  const who = cc => cat(cc) === 'S' || (cat(cc) || '').startsWith('X:') ? ` <span class="small mute">(${sel.filter(id => C.get(cc).has(id)).map(personName).map(esc).join(', ')})</span>` : '';
   main.innerHTML = `<div class="pad">${personFilter()}
     <div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(104px,1fr))">${kp.map(k => `<div class="kpi" style="background:${k.col}"><b>${k.n}</b><span>${esc(k.label)}</span></div>`).join('')}</div>
     <div id="wmapbox" style="margin-top:12px"><div id="wmap"></div></div><p class="small mute" style="margin:6px 0 0">Punkterna är platserna ${sel.length === 1 ? esc(personName(sel[0])) + ' varit på' : 'ni varit på'}, i samma färger som länderna. Tryck på en punkt för namn och resa.</p>
-    <div style="margin-top:12px">${cats.map(k => { const l = byCat(k); return l.length ? `<div class="cl"><i style="background:${catColor(k)};${k === 'M' ? 'border:2px dashed #6b7a80' : ''}"></i><span><b>${esc(catLabel(k, sel))} (${l.length}):</b> ${l.map(cc => `${flag(cc)} ${esc(cName(cc))}${who(cc)}`).join(', ')}</span></div>` : ''; }).join('') || '<div class="empty">Lägg till platser i en resa så färgas länderna här.</div>'}</div></div>`;
+    <div style="margin-top:12px">${cats.map(k => { const l = byCat(k); return l.length ? `<div class="cl"><i style="background:${k === 'X' ? stripeCss(sel) : catColor(k)};${k === 'M' ? 'border:2px dashed #6b7a80' : ''}"></i><span><b>${esc(catLabel(k, sel))} (${l.length}):</b> ${l.map(cc => `${flag(cc)} ${esc(cName(cc))}${who(cc)}`).join(', ')}</span></div>` : ''; }).join('') || '<div class="empty">Lägg till platser i en resa så färgas länderna här.</div>'}</div></div>`;
   bindPersonFilter(main);
   if (!window.maplibregl) { $('#wmapbox').innerHTML = '<div class="mapmsg">Kartan behöver nät första gången.</div>'; return; }
   if (wmap) { try { wmap.remove(); } catch (e) {} wmap = null; wReady = false; }
@@ -934,27 +937,54 @@ function viewVarlden(main) {
       try { await loadCountries(); } catch (e) { $('#wmapbox').insertAdjacentHTML('beforeend', '<div class="mapmsg">Världskartan behöver nät första gången.</div>'); return; }
       wmap.addSource('c', { type: 'geojson', data: countries });
       wmap.addLayer({ id: 'cf', type: 'fill', source: 'c', paint: { 'fill-color': ['coalesce', ['get', 'col'], '#f4f1e6'], 'fill-opacity': 0.92 } });
+      wmap.addLayer({ id: 'cfp', type: 'fill', source: 'c', filter: ['has', 'pat'], paint: { 'fill-pattern': ['get', 'pat'], 'fill-opacity': 0.95 } });
       wmap.addLayer({ id: 'cl', type: 'line', source: 'c', paint: { 'line-color': ['case', ['==', ['get', 'cat'], 'M'], '#6b7a80', '#a8551b'], 'line-width': ['case', ['==', ['get', 'cat'], 'M'], 1.6, 0.4] } });
       wmap.addSource('pl', { type: 'geojson', data: fc([]) });
-      wmap.addLayer({ id: 'plc', type: 'circle', source: 'pl', paint: {
+      wmap.addLayer({ id: 'plc', type: 'circle', source: 'pl', filter: ['!', ['has', 'icon']], paint: {
         'circle-color': ['get', 'col'],
         'circle-radius': ['interpolate', ['linear'], ['zoom'], 0, ['case', ['get', 'via'], 1.2, 1.6], 2, ['case', ['get', 'via'], 1.6, 2.2], 4, ['case', ['get', 'via'], 2.5, 3.5], 7, ['case', ['get', 'via'], 4, 6], 10, ['case', ['get', 'via'], 5, 8]],
         'circle-stroke-color': ['case', ['get', 'via'], '#6b7a80', '#ffffff'],
         'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 0, 0.5, 3, 0.8, 6, 1.5] } });
+      wmap.addLayer({ id: 'pli', type: 'symbol', source: 'pl', filter: ['has', 'icon'], layout: { 'icon-image': ['get', 'icon'], 'icon-allow-overlap': true, 'icon-size': ['interpolate', ['linear'], ['zoom'], 0, 0.2, 2, 0.26, 4, 0.36, 7, 0.6, 10, 0.8] } });
       wReady = true; paintWorld();
+      wmap.on('click', 'pli', e => { const p = e.features[0].properties; new maplibregl.Popup({ closeButton: false }).setLngLat(e.features[0].geometry.coordinates).setHTML(`<b>${esc(p.name)}</b><div style="font-size:12px;margin-top:4px;line-height:1.5">${p.info}</div>`).addTo(wmap); });
       wmap.on('click', 'plc', e => { const p = e.features[0].properties; new maplibregl.Popup({ closeButton: false }).setLngLat(e.features[0].geometry.coordinates).setHTML(`<b>${esc(p.name)}</b><div style="font-size:12px;margin-top:4px;line-height:1.5">${p.info}</div>`).addTo(wmap); });
       wmap.on('mouseenter', 'plc', () => wmap.getCanvas().style.cursor = 'pointer');
       wmap.on('mouseleave', 'plc', () => wmap.getCanvas().style.cursor = '');
-      wmap.on('click', 'cf', e => { if (wmap.queryRenderedFeatures(e.point, { layers: ['plc'] }).length) return; const p = e.features[0].properties; new maplibregl.Popup({ closeButton: false }).setLngLat(e.lngLat).setHTML(`<b>${flag(p.cc)} ${esc(cName(p.cc) || p.name)}</b>`).addTo(wmap); });
+      wmap.on('click', 'cf', e => { if (wmap.queryRenderedFeatures(e.point, { layers: ['plc', 'pli'] }).length) return; const p = e.features[0].properties; new maplibregl.Popup({ closeButton: false }).setLngLat(e.lngLat).setHTML(`<b>${flag(p.cc)} ${esc(cName(p.cc) || p.name)}</b>`).addTo(wmap); });
     });
   }
+}
+const hexRgb = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+function stripeImageFor(ids) {
+  const key = 'pat-' + ids.join('_');
+  if (!wmap.hasImage(key)) {
+    const cols = ids.map(id => hexRgb(personColor(id))), w = 10, T = cols.length * w, data = new Uint8Array(T * T * 4);
+    for (let y = 0; y < T; y++) for (let x = 0; x < T; x++) { const c = cols[Math.floor(((x + y) % T) / w)], i = (y * T + x) * 4; data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2]; data[i + 3] = 240; }
+    wmap.addImage(key, { width: T, height: T, data }, { pixelRatio: 2 });
+  }
+  return key;
+}
+function pieImageFor(ids) {
+  const key = 'pie-' + ids.join('_');
+  if (!wmap.hasImage(key)) {
+    const S2 = 48, c = document.createElement('canvas'); c.width = c.height = S2; const g = c.getContext('2d'), r = S2 / 2 - 4, n = ids.length;
+    ids.forEach((id, i) => { g.beginPath(); g.moveTo(S2 / 2, S2 / 2); g.arc(S2 / 2, S2 / 2, r, -Math.PI / 2 + i * 2 * Math.PI / n, -Math.PI / 2 + (i + 1) * 2 * Math.PI / n); g.closePath(); g.fillStyle = personColor(id); g.fill(); });
+    g.beginPath(); g.arc(S2 / 2, S2 / 2, r, 0, 2 * Math.PI); g.lineWidth = 4; g.strokeStyle = '#ffffff'; g.stroke();
+    wmap.addImage(key, g.getImageData(0, 0, S2, S2), { pixelRatio: 2 });
+  }
+  return key;
 }
 function paintWorld() {
   if (!wReady || !countries) return;
   const sel = selIds(), { C, V } = visitData();
-  countries.features.forEach(f => { const c = catFor(C.get(f.properties.cc), V.get(f.properties.cc), sel); f.properties.cat = c || ''; f.properties.col = c ? catColor(c) : null; });
+  countries.features.forEach(f => {
+    const c = catFor(C.get(f.properties.cc), V.get(f.properties.cc), sel);
+    f.properties.cat = c || ''; f.properties.col = c ? catColor(c) : null;
+    if (c && c.startsWith('X:')) f.properties.pat = stripeImageFor(c.slice(2).split(',')); else delete f.properties.pat;
+  });
   wmap.getSource('c').setData(countries);
-  if (wmap.getSource('pl')) wmap.getSource('pl').setData(fc(placePoints(sel)));
+  if (wmap.getSource('pl')) wmap.getSource('pl').setData(fc(placePoints(sel).map(f => { if (f.properties.mix) f.properties.icon = pieImageFor(f.properties.mix.split(',')); return f; })));
 }
 function placePoints(sel) {
   const P = new Map(), key = (lat, lon) => lat.toFixed(2) + ',' + lon.toFixed(2);
@@ -979,7 +1009,7 @@ function placePoints(sel) {
   for (const p of P.values()) {
     const cat = catFor(p.vis.size ? p.vis : null, p.vias, sel); if (!cat) continue;
     const info = [...p.trips.entries()].map(([trip, x]) => `${esc(trip)}: <b>${esc(persons().length > 1 || !x.vis.size ? whoOf(x) : 'besökt')}</b>`).join('<br>');
-    out.push({ type: 'Feature', properties: { name: p.name, via: cat === 'M', col: catColor(cat), info }, geometry: { type: 'Point', coordinates: [p.lon, p.lat] } });
+    out.push({ type: 'Feature', properties: { name: p.name, via: cat === 'M', col: catColor(cat), info, ...(cat.startsWith('X:') ? { mix: cat.slice(2) } : {}) }, geometry: { type: 'Point', coordinates: [p.lon, p.lat] } });
   }
   return out;
 }
