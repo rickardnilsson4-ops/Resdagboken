@@ -712,6 +712,10 @@ let wmap, wReady = false, countries = null, wHolder;
 async function loadCountries() {
   if (countries) return countries;
   const r = await fetch(COUNTRIES_URL); const j = await r.json();
+  j.features.forEach(f => {
+    const p = f.properties, cc0 = (p.ISO_A2_EH && p.ISO_A2_EH !== '-99' ? p.ISO_A2_EH : p.ISO_A2);
+    if (cc0 === 'FR' && f.geometry.type === 'MultiPolygon') f.geometry.coordinates = f.geometry.coordinates.filter(poly => { const [x, y] = poly[0][0]; return x > -6 && x < 11 && y > 41 && y < 52; });
+  });
   j.features.forEach(f => { const p = f.properties; f.properties = { cc: (p.ISO_A2_EH && p.ISO_A2_EH !== '-99' ? p.ISO_A2_EH : p.ISO_A2) || '', name: p.NAME }; });
   return countries = j;
 }
@@ -739,9 +743,9 @@ function viewVarlden(main) {
       wmap.addSource('pl', { type: 'geojson', data: fc([]) });
       wmap.addLayer({ id: 'plc', type: 'circle', source: 'pl', paint: {
         'circle-color': ['get', 'col'],
-        'circle-radius': ['interpolate', ['linear'], ['zoom'], 0, ['case', ['get', 'via'], 2, 3], 4, ['case', ['get', 'via'], 3.5, 6], 8, ['case', ['get', 'via'], 5, 9]],
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 0, ['case', ['get', 'via'], 1.2, 1.6], 2, ['case', ['get', 'via'], 1.6, 2.2], 4, ['case', ['get', 'via'], 2.5, 3.5], 7, ['case', ['get', 'via'], 4, 6], 10, ['case', ['get', 'via'], 5, 8]],
         'circle-stroke-color': ['case', ['get', 'via'], '#6b7a80', '#ffffff'],
-        'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 0, 1, 6, 2] } });
+        'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 0, 0.5, 3, 0.8, 6, 1.5] } });
       wReady = true; paintWorld();
       wmap.on('click', 'plc', e => { const p = e.features[0].properties; new maplibregl.Popup({ closeButton: false }).setLngLat(e.features[0].geometry.coordinates).setHTML(`<b>${esc(p.name)}</b><br><span style="font-size:12px">${esc(p.info)}</span>`).addTo(wmap); });
       wmap.on('mouseenter', 'plc', () => wmap.getCanvas().style.cursor = 'pointer');
