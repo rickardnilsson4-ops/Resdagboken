@@ -185,35 +185,37 @@ function bez(a, b, bend, n = 40) {
 }
 const hasPos = s => s && s.data.lat != null && s.data.lon != null;
 const pos = s => [s.data.lon, s.data.lat];
-const routeKey = (a, b) => [b.data.mode, a.data.lat, a.data.lon, b.data.lat, b.data.lon, (b.data.via || []).map(v => v.lat + ',' + v.lon).join(';')].join('|');
+const routeKey = (a, b) => [b.data.mode, a.data.lat, a.data.lon, b.data.lat, b.data.lon, (b.data.via || []).map(v => v.lat + ',' + v.lon).join(';'), ].join('|') + ((b.data.pass || []).length ? '|p:' + b.data.pass.map(v => v.lat + ',' + v.lon).join(';') : '');
 function fallbackGeom(a, b) {
   const m = MODES[b.data.mode] || MODES.bil;
   if (m.r === 'air') { const pts = [pos(a), ...(b.data.via || []).map(v => [v.lon, v.lat]), pos(b)]; let o = []; for (let i = 1; i < pts.length; i++) { const seg = gc(pts[i - 1], pts[i]); if (o.length) { const last = o[o.length - 1]; const sh = Math.round((last[0] - seg[0][0]) / 360) * 360; seg.forEach(p => p[0] += sh); seg.shift(); } o = o.concat(seg); } return o; }
   if (m.r === 'sea') return bez(pos(a), pos(b), .12);
-  return [pos(a), pos(b)];
+  return [pos(a), ...(b.data.pass || []).map(v => [v.lon, v.lat]), pos(b)];
 }
 function legs(t) {
   const st = stopsOf(t.id).filter(hasPos), out = [];
   for (let i = 1; i < st.length; i++) {
     const a = st[i - 1], b = st[i], m = MODES[b.data.mode] || MODES.bil;
-    const routed = b.data.route && b.data.route_key === routeKey(a, b);
-    const coords = routed ? b.data.route : fallbackGeom(a, b);
-    out.push({ a, b, m, mode: b.data.mode || 'bil', coords, km: lineKm(coords), routed, tr: b.data.travelers || [], via: b.data.via || [] });
+    let routed = !b.data.straight && b.data.route && b.data.route_key === routeKey(a, b), detour = false;
+    const fb = fallbackGeom(a, b);
+    if (routed) { const d = lineKm(fb); if (d > 3 && lineKm(b.data.route) > d * 3 + 10) { routed = false; detour = true; } }
+    const coords = routed ? b.data.route : fb;
+    out.push({ a, b, m, mode: b.data.mode || 'bil', coords, km: lineKm(coords), routed, detour, tr: b.data.travelers || [], via: b.data.via || [] });
   }
   return out;
 }
 
 /* ---------------- ruttsökning ---------------- */
 async function fetchRoute(a, b) {
-  const m = MODES[b.data.mode] || MODES.bil, A = pos(a), B = pos(b);
+  const m = MODES[b.data.mode] || MODES.bil, P = [pos(a), ...(b.data.pass || []).map(v => [v.lon, v.lat]), pos(b)];
   if (m.r === 'car' || m.r === 'bike' || m.r === 'foot') {
     const prof = { car: 'routed-car', bike: 'routed-bike', foot: 'routed-foot' }[m.r];
-    const r = await fetch(`https://routing.openstreetmap.de/${prof}/route/v1/driving/${A[0]},${A[1]};${B[0]},${B[1]}?overview=full&geometries=geojson`);
+    const r = await fetch(`https://routing.openstreetmap.de/${prof}/route/v1/driving/${P.map(p => p.join(',')).join(';')}?overview=full&geometries=geojson`);
     if (!r.ok) throw new Error('route ' + r.status);
     const j = await r.json(); return j.routes && j.routes[0] && j.routes[0].geometry.coordinates;
   }
   if (m.r === 'rail') {
-    const r = await fetch(`https://brouter.de/brouter?lonlats=${A[0]},${A[1]}|${B[0]},${B[1]}&profile=rail&alternativeidx=0&format=geojson`);
+    const r = await fetch(`https://brouter.de/brouter?lonlats=${P.map(p => p.join(',')).join('|')}&profile=rail&alternativeidx=0&format=geojson`);
     if (!r.ok) throw new Error('rail ' + r.status);
     const j = await r.json(); const c = j.features && j.features[0] && j.features[0].geometry.coordinates;
     return c && c.map(p => [p[0], p[1]]);
@@ -233,7 +235,7 @@ async function routePending() {
     const st = stopsOf(t.id).filter(hasPos);
     for (let i = 1; i < st.length; i++) {
       const a = st[i - 1], b = st[i], m = MODES[b.data.mode] || MODES.bil;
-      if (!['car', 'bike', 'foot', 'rail'].includes(m.r)) continue;
+      if (!['car', 'bike', 'foot', 'rail'].includes(m.r) || b.data.straight) continue;
       const key = routeKey(a, b);
       if (b.data.route_key === key || b.data.route_fail === key) continue;
       if (hav(pos(a), pos(b)) > 2500) { await saveDoc('stop', { route_fail: key }, b.id); continue; }
@@ -564,7 +566,7 @@ function viewKarta(main, t) {
     <div class="row"><button class="pri" id="play" style="flex:1">Spela upp resan</button><button id="rec" style="flex:1">Spara som video</button></div>
     <div class="row" style="margin-top:8px"><span class="small mute">Fart</span><div class="seg" id="speed" style="flex:1"><button data-s="0.6">Lugn</button><button data-s="1" class="on">Normal</button><button data-s="2">Snabb</button></div></div>
     <div class="legend">${Object.values(MODES).map(m => `<span><svg width="24" height="8" aria-hidden="true"><line x1="2" y1="4" x2="22" y2="4" stroke="${m.c}" stroke-width="${m.w}" stroke-linecap="round" ${m.d === 'dash' ? 'stroke-dasharray="7 4"' : m.d === 'dot' ? 'stroke-dasharray="0.1 7"' : ''}/></svg>${m.n}</span>`).join('')}</div>
-    <p class="small mute">${L.length} etapper · ${nf(L.reduce((s, l) => s + l.km, 0))} km${L.some(l => !l.routed && ['car', 'bike', 'foot', 'rail'].includes(l.m.r)) ? ' · vissa rutter räknas ut när du är uppkopplad' : ''}</p>
+    <p class="small mute">${L.length} etapper · ${nf(L.reduce((s, l) => s + l.km, 0))} km${L.some(l => !l.routed && !l.detour && !l.b.data.straight && ['car', 'bike', 'foot', 'rail'].includes(l.m.r)) ? ' · vissa rutter räknas ut när du är uppkopplad' : ''}</p>
     ${vids.length ? `<h3 style="margin-top:12px">Videor</h3>${vids.map(v => `<div class="spread card" style="padding:10px 14px;margin:8px 0 0"><span>${esc(new Date(v.data.created).toLocaleString('sv-SE', { dateStyle: 'medium', timeStyle: 'short' }))}${v.data.pending ? ' <span class="small mute">· laddas upp</span>' : ''}</span><button class="sm" data-vid="${v.id}">Visa</button></div>`).join('')}` : ''}
   </div>`;
   detachMap();
@@ -671,7 +673,7 @@ function viewEtapper(main, t) {
     const via = (s.data.via || []).map(v => v.name).join(', ');
     html += `<div class="leg srow" data-s="${s.id}"><span class="grip" aria-label="Dra för att flytta" role="button" tabindex="-1">≡</span><div class="bar" style="background:${i ? m.c : '#13242e'}"></div>
       <div class="open"><div class="t">${i ? `${esc(st[i - 1].data.name)} → ` : ''}${esc(s.data.name)} ${flag(s.data.cc)}</div>
-      <div class="s">${i ? esc(m.n) : 'Start'}${l ? ' · ' + nf(l.km) + ' km' : ''}${via ? ` · <span class="via">mellanlandning ${esc(via)}</span>` : ''}${!hasPos(s) ? ' · <b>saknar position</b>' : ''}</div></div>
+      <div class="s">${i ? esc(m.n) : 'Start'}${l ? ' · ' + nf(l.km) + ' km' : ''}${via ? ` · <span class="via">mellanlandning ${esc(via)}</span>` : ''}${!hasPos(s) ? ' · <b>saknar position</b>' : ''}${i && s.data.straight ? ' · rak linje' : ''}${i && (s.data.pass || []).length ? ` · via ${esc(s.data.pass.map(v => v.name).join(', '))}` : ''}${l && l.detour ? ' · <span class="via">vägen blev en stor omväg – rak linje visas</span>' : ''}</div></div>
       <div class="open">${whoBadge(s.data.travelers)}</div></div>`;
   });
   main.innerHTML = html + '</div></div>';
@@ -779,12 +781,14 @@ function stopDlg(t, s, preset) {
   const last = st[st.length - 1];
   const D = s ? JSON.parse(JSON.stringify(s.data)) : { trip: t.id, name: '', date: last ? last.data.date : today(), mode: 'bil', travelers: last ? travelersOf(last.data.travelers) : allIds(), via: [], seq: (last ? (last.data.seq || 0) : 0) + 1 };
   if (preset && !s) Object.assign(D, { name: preset.name, sub: preset.sub || '', lat: preset.lat, lon: preset.lon, cc: preset.cc }, preset.date ? { date: preset.date } : {}, preset.needsName ? { needsName: true } : {});
-  if (!D.via) D.via = []; if (!D.travelers) D.travelers = [];
+  if (!D.via) D.via = []; if (!D.pass) D.pass = []; if (!D.travelers) D.travelers = [];
   const home = homeOf();
   const b = openDlg(`<h2>${s ? 'Ändra plats' : isFirst ? 'Startplats' : 'Ny plats'}</h2>
     <label>Plats</label><div id="sb"></div>${home ? `<button type="button" class="sm" id="usehome" style="margin-top:6px">Hem: ${esc(home.name)}</button>` : ''}<div id="picked" class="note"${D.lat != null ? '' : ' hidden'}></div>
     ${isFirst ? '' : `<label>Färdmedel hit</label><div class="chips" id="modes">${Object.entries(MODES).map(([k, m]) => `<button type="button" class="chip" data-m="${k}">${m.n}</button>`).join('')}</div>
-    <div id="viabox" hidden><label>Mellanlandningar</label><div id="vias"></div><div id="vsb" style="margin-top:6px"></div><p class="small mute" style="margin:4px 0 0">Räknas inte som besökt land.</p></div>`}
+    <div id="viabox" hidden><label>Mellanlandningar</label><div id="vias"></div><div id="vsb" style="margin-top:6px"></div><p class="small mute" style="margin:4px 0 0">Räknas inte som besökt land.</p></div>
+    <div id="routebox" hidden><label>Hur ska vägen ritas?</label><div class="chips" id="rmode"><button type="button" class="chip" data-r="auto">Längs väg/räls</button><button type="button" class="chip" data-r="straight">Rak linje</button></div>
+    <div id="passwrap"><div id="passes" style="margin-top:6px"></div><div id="psb" style="margin-top:6px"></div><p class="small mute" style="margin:4px 0 0">Blir vägen fel? Lägg till en ort som vägen ska gå förbi. Räknas inte som besökt plats.</p></div></div>`}
     <div class="whowrap"><label>Vem reste?</label><div class="chips" id="who"></div></div>
     <label for="sd">Datum</label><input id="sd" type="date" value="${esc(D.date || '')}">
     <div class="row end" style="margin-top:16px">${s ? '<button type="button" id="up" class="sm">↑</button><button type="button" id="dn" class="sm">↓</button><button type="button" id="del">Ta bort</button>' : ''}<button type="button" data-close>Avbryt</button><button class="pri" id="ok">Spara</button></div>`);
@@ -792,13 +796,17 @@ function stopDlg(t, s, preset) {
   const inp = searchBox($('#sb'), p => { Object.assign(D, { name: p.name, sub: p.sub, lat: p.lat, lon: p.lon, cc: p.cc }); showPicked(); });
   inp.value = D.name || ''; showPicked();
   if ($('#usehome')) $('#usehome').onclick = () => { Object.assign(D, { name: home.name, sub: home.sub || '', lat: home.lat, lon: home.lon, cc: home.cc }); inp.value = home.name; showPicked(); };
-  const renderModes = () => { if (!$('#modes')) return; $('#modes').querySelectorAll('[data-m]').forEach(x => { const on = x.dataset.m === D.mode; x.classList.toggle('on', on); x.style.background = on ? MODES[x.dataset.m].c : ''; x.style.borderColor = on ? MODES[x.dataset.m].c : ''; }); $('#viabox').hidden = D.mode !== 'flyg'; };
+  const renderModes = () => { if (!$('#modes')) return; $('#modes').querySelectorAll('[data-m]').forEach(x => { const on = x.dataset.m === D.mode; x.classList.toggle('on', on); x.style.background = on ? MODES[x.dataset.m].c : ''; x.style.borderColor = on ? MODES[x.dataset.m].c : ''; }); $('#viabox').hidden = D.mode !== 'flyg'; const ground = ['car', 'bike', 'foot', 'rail'].includes((MODES[D.mode] || MODES.bil).r); $('#routebox').hidden = !ground; $('#rmode').querySelectorAll('[data-r]').forEach(x => { const on = (x.dataset.r === 'straight') === !!D.straight; x.classList.toggle('on', on); x.style.background = x.style.borderColor = on ? '#13242e' : ''; }); $('#passwrap').hidden = !!D.straight; };
+  const renderPass = () => { if (!$('#passes')) return; $('#passes').innerHTML = D.pass.map((v, i) => `<div class="spread" style="padding:4px 0"><span>via ${flag(v.cc)} ${esc(v.name)}</span><button type="button" class="sm" data-rp="${i}" aria-label="Ta bort">✕</button></div>`).join(''); };
   const renderVias = () => { if (!$('#vias')) return; $('#vias').innerHTML = D.via.map((v, i) => `<div class="spread" style="padding:4px 0"><span>${flag(v.cc)} ${esc(v.name)}</span><button type="button" class="sm" data-rv="${i}" aria-label="Ta bort">✕</button></div>`).join(''); };
   if ($('#modes')) {
     $('#modes').onclick = e => { const x = e.target.closest('[data-m]'); if (x) { D.mode = x.dataset.m; renderModes(); } };
     $('#vias').onclick = e => { const x = e.target.closest('[data-rv]'); if (x) { D.via.splice(+x.dataset.rv, 1); renderVias(); } };
     const vin = searchBox($('#vsb'), p => { D.via.push({ name: p.name, lat: p.lat, lon: p.lon, cc: p.cc }); vin.value = ''; renderVias(); }, '+ Lägg till mellanlandning (sök flygplats)');
-    renderModes(); renderVias();
+    $('#rmode').onclick = e => { const x = e.target.closest('[data-r]'); if (x) { D.straight = x.dataset.r === 'straight'; renderModes(); } };
+    $('#passes').onclick = e => { const x = e.target.closest('[data-rp]'); if (x) { D.pass.splice(+x.dataset.rp, 1); renderPass(); } };
+    const pin = searchBox($('#psb'), p => { D.pass.push({ name: p.name, lat: p.lat, lon: p.lon, cc: p.cc }); pin.value = ''; renderPass(); }, '+ Passera via (sök ort)');
+    renderModes(); renderVias(); renderPass();
   }
   const getWho = whoPicker($('#who'), D.travelers);
   $('#ok').onclick = async () => {
@@ -807,6 +815,8 @@ function stopDlg(t, s, preset) {
     D.name = typed;
     D.date = $('#sd').value; D.travelers = getWho(); if (isFirst) D.mode = '';
     if (D.mode !== 'flyg') D.via = [];
+    if (!['car', 'bike', 'foot', 'rail'].includes((MODES[D.mode] || {}).r)) { D.pass = []; D.straight = false; }
+    if (D.straight) D.pass = [];
     await saveDoc('stop', D, s && s.id); closeDlg(); render();
   };
   if (s) {
