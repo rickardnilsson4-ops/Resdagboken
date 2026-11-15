@@ -221,20 +221,89 @@ function fallbackGeom(a, b) {
   if (m.r === 'sea') return bez(pos(a), pos(b), .12);
   return [pos(a), ...(b.data.pass || []).map(v => [v.lon, v.lat]), pos(b)];
 }
+const GROUND = ['car', 'bike', 'foot', 'rail'];
+const rmOf = s => s.data.rmode || (s.data.straight ? 'straight' : 'auto');
 function legs(t) {
   const st = stopsOf(t.id).filter(hasPos), out = [];
   for (let i = 1; i < st.length; i++) {
     const a = st[i - 1], b = st[i], m = MODES[b.data.mode] || MODES.bil;
-    let routed = !b.data.straight && b.data.route && b.data.route_key === routeKey(a, b), detour = false;
-    const fb = fallbackGeom(a, b);
-    if (routed) { const d = lineKm(fb); if (d > 3 && lineKm(b.data.route) > d * 3 + 10) { routed = false; detour = true; } }
-    const coords = routed ? b.data.route : fb;
+    const rm = GROUND.includes(m.r) ? rmOf(b) : 'auto', drawn = rm === 'draw' && (b.data.drawn || []).length;
+    let routed = !drawn && rm !== 'straight' && rm !== 'draw' && b.data.route && b.data.route_key === routeKey(a, b), detour = false;
+    const fb = drawn ? [pos(a), ...b.data.drawn, pos(b)] : fallbackGeom(a, b);
+    if (routed && rm === 'auto') { const d = lineKm(fb); if (d > 3 && lineKm(b.data.route) > d * 3 + 10) { routed = false; detour = true; } }
+    if (drawn) routed = true;
+    const coords = routed && !drawn ? b.data.route : fb;
     out.push({ a, b, m, mode: b.data.mode || 'bil', coords, km: lineKm(coords), routed, detour, tr: b.data.travelers || [], via: b.data.via || [] });
   }
   return out;
 }
 
+/* ---------------- rita egen väg ---------------- */
+function drawRoute(A, B, start, ref, color, onDone) {
+  if (!window.maplibregl) { toast('Kartan behöver nät för att rita'); return; }
+  const ov = document.createElement('div'); ov.className = 'drawov';
+  ov.innerHTML = `<div class="drawtop"><b>Rita vägen</b><span>Tryck på kartan där vägen går – punkterna läggs in i rätt ordning. Dra i en punkt för att flytta den. Zooma in för stigar och spår.</span></div>
+    <div id="dmap"></div>
+    <div class="drawbar">${ref && ref.length > 2 && !start.length ? '<button id="dref" style="flex:1 1 100%">Börja från nuvarande linje</button>' : ''}<button id="dundo" style="flex:1">Ångra</button><button id="dclear" style="flex:1">Rensa</button><button id="dcancel" style="flex:1">Avbryt</button><button class="pri" id="dok" style="flex:1">Klar</button></div>`;
+  document.body.appendChild(ov);
+  let P = start.map(p => p.slice()); const hist = [];
+  const all = [A, B, ...P, ...(ref || [])], bb = all.reduce((b, c) => [Math.min(b[0], c[0]), Math.min(b[1], c[1]), Math.max(b[2], c[0]), Math.max(b[3], c[1])], [999, 999, -999, -999]);
+  const m = new maplibregl.Map({ container: ov.querySelector('#dmap'), style: STYLE_URL, bounds: [[bb[0], bb[1]], [bb[2], bb[3]]], fitBoundsOptions: { padding: 50, maxZoom: 15 }, attributionControl: { compact: true } });
+  m.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
+  let markers = [];
+  const line = () => [A, ...P, B];
+  const setData = () => { const src = m.getSource('d'); if (src) src.setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: line() } }); $('#dundo').disabled = !hist.length; };
+  const redraw = () => {
+    markers.forEach(x => x.remove());
+    markers = P.map((p, i) => { const el = document.createElement('div'); el.className = 'dv'; el.style.background = color;
+      const mk = new maplibregl.Marker({ element: el, draggable: true }).setLngLat(p).addTo(m);
+      mk.on('dragstart', () => hist.push(P.map(q => q.slice())));
+      mk.on('drag', () => { const l = mk.getLngLat(); P[i] = [+l.lng.toFixed(5), +l.lat.toFixed(5)]; setData(); });
+      return mk; });
+    setData();
+  };
+  const flat = (p, q) => { const k = Math.cos(((p[1] + q[1]) / 2) * Math.PI / 180); return Math.hypot((p[0] - q[0]) * k, p[1] - q[1]); };
+  m.on('load', () => {
+    if (ref && ref.length > 1) { m.addSource('ref', { type: 'geojson', data: { type: 'Feature', geometry: { type: 'LineString', coordinates: ref } } }); m.addLayer({ id: 'ref', type: 'line', source: 'ref', paint: { 'line-color': '#8a9aa2', 'line-width': 3, 'line-dasharray': [1, 2], 'line-opacity': .7 } }); }
+    m.addSource('d', { type: 'geojson', data: { type: 'Feature', geometry: { type: 'LineString', coordinates: line() } } });
+    m.addLayer({ id: 'dcase', type: 'line', source: 'd', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#fff', 'line-width': 7 } });
+    m.addLayer({ id: 'dline', type: 'line', source: 'd', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': color, 'line-width': 4 } });
+    m.addSource('ends', { type: 'geojson', data: { type: 'FeatureCollection', features: [A, B].map(c => ({ type: 'Feature', geometry: { type: 'Point', coordinates: c } })) } });
+    m.addLayer({ id: 'ends', type: 'circle', source: 'ends', paint: { 'circle-radius': 7, 'circle-color': '#13242e', 'circle-stroke-color': '#fff', 'circle-stroke-width': 2 } });
+    redraw();
+  });
+  m.on('click', e => {
+    const p = [+e.lngLat.lng.toFixed(5), +e.lngLat.lat.toFixed(5)], L = line();
+    let best = 0, cost = Infinity;
+    for (let k = 0; k < L.length - 1; k++) { const c = flat(L[k], p) + flat(p, L[k + 1]) - flat(L[k], L[k + 1]); if (c < cost) { cost = c; best = k; } }
+    hist.push(P.map(q => q.slice())); P.splice(best, 0, p); redraw();
+  });
+  const close = () => { try { m.remove(); } catch (e) {} ov.remove(); };
+  if ($('#dref')) $('#dref').onclick = () => {
+    const n = Math.min(25, ref.length - 2); hist.push(P.map(q => q.slice()));
+    P = Array.from({ length: n }, (_, i) => ref[Math.round((i + 1) * (ref.length - 1) / (n + 1))].map(x => +x.toFixed(5))); redraw(); $('#dref').remove();
+  };
+  $('#dundo').onclick = () => { if (hist.length) { P = hist.pop(); redraw(); } };
+  $('#dclear').onclick = () => { if (P.length) { hist.push(P.map(q => q.slice())); P = []; redraw(); } };
+  $('#dcancel').onclick = close;
+  $('#dok').onclick = () => { const out = P.slice(); close(); onDone(out); };
+}
+
 /* ---------------- ruttsökning ---------------- */
+async function nearStation(p, name) {
+  const pick = fs => { const f = (fs || []).filter(f => ['railway', 'public_transport', 'building'].includes(f.properties.osm_key) || /station|bahnhof|stazione|gare|estaci/i.test(f.properties.name || '')).map(f => f.geometry.coordinates).filter(c => hav(c, p) < 15).sort((x, y) => hav(x, p) - hav(y, p))[0]; return f || null; };
+  for (const tag of ['railway:station', 'railway:halt', 'public_transport:station']) {
+    try {
+      const r = await fetch(`https://photon.komoot.io/reverse?lat=${p[1]}&lon=${p[0]}&radius=10&limit=5&osm_tag=${tag}`, { signal: AbortSignal.timeout(15000) });
+      if (r.ok) { const hit = pick((await r.json()).features); if (hit) return hit; }
+    } catch (e) {}
+  }
+  try {
+    const r = await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent((name || '') + ' station')}&lat=${p[1]}&lon=${p[0]}&limit=5&osm_tag=railway:station`, { signal: AbortSignal.timeout(15000) });
+    if (r.ok) return pick((await r.json()).features);
+  } catch (e) {}
+  return null;
+}
 async function fetchRoute(a, b) {
   const m = MODES[b.data.mode] || MODES.bil, P = [pos(a), ...(b.data.pass || []).map(v => [v.lon, v.lat]), pos(b)];
   if (m.r === 'car' || m.r === 'bike' || m.r === 'foot') {
@@ -244,10 +313,20 @@ async function fetchRoute(a, b) {
     const j = await r.json(); return j.routes && j.routes[0] && j.routes[0].geometry.coordinates;
   }
   if (m.r === 'rail') {
-    const r = await fetch(`https://brouter.de/brouter?lonlats=${P.map(p => p.join(',')).join('|')}&profile=rail&alternativeidx=0&format=geojson`, { signal: AbortSignal.timeout(30000) });
-    if (!r.ok) throw new Error('rail ' + r.status);
-    const j = await r.json(); const c = j.features && j.features[0] && j.features[0].geometry.coordinates;
-    return c && c.map(p => [p[0], p[1]]);
+    const rail = async Q => {
+      const r = await fetch(`https://brouter.de/brouter?lonlats=${Q.map(p => p.map(x => x.toFixed(5)).join(',')).join('|')}&profile=rail&alternativeidx=0&format=geojson`, { signal: AbortSignal.timeout(30000) });
+      if (!r.ok) return null;
+      const j = await r.json().catch(() => null); const c = j && j.features && j.features[0] && j.features[0].geometry.coordinates;
+      return c && c.length > 1 ? c.map(p => [p[0], p[1]]) : null;
+    };
+    let c = await rail(P);
+    if (!c) {
+      // platsen ligger ofta en bit från spåren (stadens mitt, flygplatsens terminal) – utgå då från närmaste station
+      const sa = await nearStation(P[0], a.data.name), sb = await nearStation(P[P.length - 1], b.data.name);
+      if (sa || sb) { c = await rail([sa || P[0], ...P.slice(1, -1), sb || P[P.length - 1]]); if (c) c = [P[0], ...c, P[P.length - 1]]; }
+    }
+    if (!c) throw new Error('rail');
+    return c;
   }
   return null;
 }
@@ -286,7 +365,7 @@ async function routeWork() {
     const st = stopsOf(t.id).filter(hasPos);
     for (let i = 1; i < st.length; i++) {
       const a = st[i - 1], b = st[i], m = MODES[b.data.mode] || MODES.bil;
-      if (!['car', 'bike', 'foot', 'rail'].includes(m.r) || b.data.straight) continue;
+      if (!GROUND.includes(m.r) || ['straight', 'draw'].includes(rmOf(b))) continue;
       const key = routeKey(a, b);
       if (b.data.route_key === key || b.data.route_fail === key) continue;
       if (hav(pos(a), pos(b)) > 2500) { await saveDoc('stop', { route_fail: key }, b.id); continue; }
@@ -667,13 +746,15 @@ function viewResor(main) {
     const phs = photosOfTrip(t.id).sort((x, y) => (x.data.date || x.data.taken || '').localeCompare(y.data.date || y.data.taken || ''));
     const cover = t.data.cover && live(S.docs.get(t.data.cover)) ? t.data.cover : phs[0] && phs[0].id;
     const dates = a ? `${fmtShort(a)}${b && b !== a ? ' – ' + fmtShort(b) : ''} ${yr(b || a)}` : 'Inga datum';
-    return `<button class="tcard" data-t="${t.id}">
+    return `<div class="tcard" role="button" tabindex="0" data-t="${t.id}">
       <div class="cover">${cover ? `<img data-photo="${cover}" alt="" loading="lazy">` : `<div class="nocover">${ccs.slice(0, 5).map(flag).join(' ') || '🧭'}</div>`}</div>
       <div class="tb"><div class="spread"><b class="tt">${esc(t.data.title)}</b>${personDots(tripTravelers(t))}</div>
       <div class="small mute">${esc(dates)}</div>
-      <div class="small">${ccs.length ? ccs.map(flag).join(' ') + ' · ' : ''}${nf(km)} km · ${st.length} platser${phs.length ? ` · ${phs.length} bilder` : ''}</div></div></button>`;
+      <div class="small">${ccs.length ? ccs.map(flag).join(' ') + ' · ' : ''}${nf(km)} km · ${st.length} platser${phs.length ? ` · ${phs.length} bilder` : ''}</div>
+      ${t.data.album ? `<a class="alink" href="${esc(t.data.album)}" target="_blank" rel="noopener">Fotoalbum ↗</a>` : ''}</div></div>`;
   }).join('')}</div>`;
-  main.querySelectorAll('[data-t]').forEach(b => b.onclick = () => { S.trip = b.dataset.t; idbPut('kv', S.trip, 'trip'); location.hash = 'resa'; });
+  main.querySelectorAll('.alink').forEach(a => a.onclick = e => e.stopPropagation());
+  main.querySelectorAll('[data-t]').forEach(b => { const go = () => { S.trip = b.dataset.t; idbPut('kv', S.trip, 'trip'); location.hash = 'resa'; }; b.onclick = go; b.onkeydown = e => { if (e.key === 'Enter') go(); }; });
 }
 function addMenu(t) {
   const home = homeOf(), st = stopsOf(t.id), lastSt = st[st.length - 1];
@@ -703,7 +784,7 @@ function viewResa(main, t) {
   if (!t) { main.innerHTML = noTrip(); return; }
   const st = stopsOf(t.id), L = legs(t), byStop = new Map(L.map(l => [l.b.id, l])), vids = videosOf(t.id);
   const def = tripTravelers(t), km = L.reduce((s, l) => s + l.km, 0);
-  const pendingRoutes = L.some(l => !l.routed && !l.detour && !l.b.data.straight && ['car', 'bike', 'foot', 'rail'].includes(l.m.r));
+  const pendingRoutes = L.some(l => !l.routed && !l.detour && !['straight', 'draw'].includes(rmOf(l.b)) && GROUND.includes(l.m.r));
   let list = '', lastDay = null;
   st.forEach((s, i) => {
     const day = s.data.date || '';
@@ -711,7 +792,7 @@ function viewResa(main, t) {
     const l = byStop.get(s.id), m = MODES[s.data.mode] || MODES.bil;
     const via = (s.data.via || []).map(v => v.name).join(', ');
     const warn = !hasPos(s) ? (s.data.geo_fail === (s.data.name || '').trim() ? 'Platsen hittades inte' : 'Saknar position – söks upp när du har nät') : s.data.geoGuess ? 'Platsen hittades automatiskt – kontrollera' : l && l.detour ? 'Vägen blev en omväg – rak linje visas' : '';
-    const sub = [i ? esc(m.n) : 'Start', l ? nf(l.km) + ' km' : '', via ? `<span class="via">mellanlandning ${esc(via)}</span>` : '', i && s.data.straight ? 'rak linje' : '', i && (s.data.pass || []).length ? 'via ' + esc(s.data.pass.map(v => v.name).join(', ')) : ''].filter(Boolean).join(' · ');
+    const sub = [i ? esc(m.n) : 'Start', l ? nf(l.km) + ' km' : '', via ? `<span class="via">mellanlandning ${esc(via)}</span>` : '', i && GROUND.includes(m.r) && rmOf(s) === 'straight' ? 'rak linje' : '', i && GROUND.includes(m.r) && rmOf(s) === 'draw' ? 'egen ritad väg' : '', i && (s.data.pass || []).length ? 'via ' + esc(s.data.pass.map(v => v.name).join(', ')) : ''].filter(Boolean).join(' · ');
     list += `<div class="leg srow" data-s="${s.id}"><span class="grip" aria-label="Dra för att flytta" role="button" tabindex="-1">≡</span><div class="bar" style="background:${i ? m.c : 'var(--sel)'}"></div>
       <div class="open"><div class="t">${i ? `${esc(st[i - 1].data.name)} → ` : ''}${esc(s.data.name)} ${flag(s.data.cc)}${warn ? ` <span class="warn-i" title="${esc(warn)}" aria-label="${esc(warn)}">⚠</span>` : ''}</div>
       <div class="s">${sub}</div></div>
@@ -720,6 +801,7 @@ function viewResa(main, t) {
   const used = Object.entries(MODES).filter(([k]) => L.some(l => l.mode === k));
   const legend = used.length ? `<div class="legend">${used.map(([k, m]) => `<span><svg width="24" height="8" aria-hidden="true"><line x1="2" y1="4" x2="22" y2="4" stroke="${m.c}" stroke-width="${m.w}" stroke-linecap="round" ${m.d === 'dash' ? 'stroke-dasharray="7 4"' : m.d === 'dot' ? 'stroke-dasharray="0.1 7"' : ''}/></svg>${m.n}</span>`).join('')}</div>` : '';
   main.innerHTML = `<div id="mapslot"></div>${legend}<div class="pad">
+    ${t.data.album ? `<a class="btn" href="${esc(t.data.album)}" target="_blank" rel="noopener" style="width:100%;margin-bottom:10px">Öppna fotoalbumet ↗</a>` : ''}
     <div class="row playrow"><button class="pri" id="play" style="flex:1">▶\uFE0E Spela upp</button><button id="rec" style="flex:1">● Spara video</button><div class="seg" id="speed" aria-label="Fart">${[[0.6, 'Lugn'], [1, 'Normal'], [2, 'Snabb']].map(([v, n]) => `<button data-s="${v}" class="${v === playSpeed ? 'on' : ''}">${n}</button>`).join('')}</div></div>
     <div class="spread" style="margin-top:16px"><div><h3>Etapper</h3><div class="small mute">${st.length} platser · ${nf(km)} km${pendingRoutes ? ' · vissa vägar ritas när du har nät' : ''}</div></div><button class="pri" id="addany">+ Lägg till</button></div>
     ${persons().length > 1 && st.length ? `<div class="small mute" style="margin-top:6px;display:flex;gap:6px;align-items:center">Reste: ${personDots(def)} <span>– visas bara på rader där det skiljer sig</span></div>` : ''}
@@ -907,15 +989,16 @@ function stopDlg(t, s, preset) {
   const last = st[st.length - 1];
   const D = s ? JSON.parse(JSON.stringify(s.data)) : { trip: t.id, name: '', date: last ? last.data.date : today(), mode: 'bil', travelers: last ? travelersOf(last.data.travelers) : allIds(), via: [], seq: (last ? (last.data.seq || 0) : 0) + 1 };
   if (preset && !s) Object.assign(D, { name: preset.name, sub: preset.sub || '', lat: preset.lat, lon: preset.lon, cc: preset.cc }, preset.date ? { date: preset.date } : {}, preset.needsName ? { needsName: true } : {});
-  if (!D.via) D.via = []; if (!D.pass) D.pass = []; if (!D.travelers) D.travelers = [];
+  if (!D.via) D.via = []; if (!D.pass) D.pass = []; if (!D.travelers) D.travelers = []; if (!D.rmode) D.rmode = D.straight ? 'straight' : 'auto'; if (!D.drawn) D.drawn = [];
   const home = homeOf();
   const leg = s && legs(t).find(l => l.b.id === s.id);
-  const note = !s ? '' : !hasPos(s) ? (s.data.geo_fail === (s.data.name || '').trim() ? 'Platsen hittades inte automatiskt. Sök fram den nedan och välj i listan.' : 'Platsen saknar position. Den söks upp automatiskt när du har nät, eller så söker du fram den nu.') : s.data.geoGuess ? `Platsen hittades automatiskt${s.data.sub ? ' (' + s.data.sub + ')' : ''}. Stämmer den? Tryck Spara. Annars sök rätt plats och välj i listan.` : leg && leg.detour ? 'Vägen hit blev en stor omväg, så en rak linje visas. Välj Rak linje, eller lägg till en ort under Passera via.' : '';
+  const note = !s ? '' : !hasPos(s) ? (s.data.geo_fail === (s.data.name || '').trim() ? 'Platsen hittades inte automatiskt. Sök fram den nedan och välj i listan.' : 'Platsen saknar position. Den söks upp automatiskt när du har nät, eller så söker du fram den nu.') : s.data.geoGuess ? `Platsen hittades automatiskt${s.data.sub ? ' (' + s.data.sub + ')' : ''}. Stämmer den? Tryck Spara. Annars sök rätt plats och välj i listan.` : leg && leg.detour ? 'Vägen hit blev en stor omväg, så en rak linje visas. Välj Följ väg/räls om omvägen är rätt, Rita själv, eller lägg till en ort under Passera via.' : '';
   const b = openDlg(`<h2>${s ? 'Ändra plats' : isFirst ? 'Startplats' : 'Ny plats'}</h2>${note ? `<div class="warn" style="margin-top:10px">⚠ ${esc(note)}</div>` : ''}
     <label>Plats</label><div id="sb"></div>${home ? `<button type="button" class="sm" id="usehome" style="margin-top:6px">Hem: ${esc(home.name)}</button>` : ''}<div id="picked" class="note"${D.lat != null ? '' : ' hidden'}></div>
     ${isFirst ? '' : `<label>Färdmedel hit</label><div class="chips" id="modes">${Object.entries(MODES).map(([k, m]) => `<button type="button" class="chip" data-m="${k}">${m.n}</button>`).join('')}</div>
     <div id="viabox" hidden><label>Mellanlandningar</label><div id="vias"></div><div id="vsb" style="margin-top:6px"></div><p class="small mute" style="margin:4px 0 0">Räknas inte som besökt land.</p></div>
-    <div id="routebox" hidden><label>Hur ska vägen ritas?</label><div class="chips" id="rmode"><button type="button" class="chip" data-r="auto">Längs väg/räls</button><button type="button" class="chip" data-r="straight">Rak linje</button></div>
+    <div id="routebox" hidden><label>Hur ska vägen ritas?</label><div class="chips" id="rmode"><button type="button" class="chip" data-r="auto">Automatiskt</button><button type="button" class="chip" data-r="force">Följ väg/räls</button><button type="button" class="chip" data-r="straight">Rak linje</button><button type="button" class="chip" data-r="draw">Rita själv</button></div><p class="small mute" id="rhelp" style="margin:6px 0 0"></p>
+    <div id="drawwrap" hidden><button type="button" id="drawbtn" style="width:100%;margin-top:8px">Rita vägen på kartan</button></div>
     <div id="passwrap"><div id="passes" style="margin-top:6px"></div><div id="psb" style="margin-top:6px"></div><p class="small mute" style="margin:4px 0 0">Blir vägen fel? Lägg till en ort som vägen ska gå förbi. Räknas inte som besökt plats.</p></div></div>`}
     <div class="whowrap"><label>Vem reste?</label><div class="chips" id="who"></div></div>
     <label for="sd">Datum</label><input id="sd" type="date" value="${esc(D.date || '')}">
@@ -924,14 +1007,23 @@ function stopDlg(t, s, preset) {
   const inp = searchBox($('#sb'), p => { Object.assign(D, { name: p.name, sub: p.sub, lat: p.lat, lon: p.lon, cc: p.cc }); showPicked(); });
   inp.value = D.name || ''; showPicked();
   if ($('#usehome')) $('#usehome').onclick = () => { Object.assign(D, { name: home.name, sub: home.sub || '', lat: home.lat, lon: home.lon, cc: home.cc }); inp.value = home.name; showPicked(); };
-  const renderModes = () => { if (!$('#modes')) return; $('#modes').querySelectorAll('[data-m]').forEach(x => { const on = x.dataset.m === D.mode; x.classList.toggle('on', on); x.style.background = on ? MODES[x.dataset.m].c : ''; x.style.borderColor = on ? MODES[x.dataset.m].c : ''; }); $('#viabox').hidden = D.mode !== 'flyg'; const ground = ['car', 'bike', 'foot', 'rail'].includes((MODES[D.mode] || MODES.bil).r); $('#routebox').hidden = !ground; $('#rmode').querySelectorAll('[data-r]').forEach(x => { const on = (x.dataset.r === 'straight') === !!D.straight; x.classList.toggle('on', on); x.style.background = x.style.borderColor = on ? 'var(--sel)' : ''; }); $('#passwrap').hidden = !!D.straight; };
+  const renderModes = () => { if (!$('#modes')) return; $('#modes').querySelectorAll('[data-m]').forEach(x => { const on = x.dataset.m === D.mode; x.classList.toggle('on', on); x.style.background = on ? MODES[x.dataset.m].c : ''; x.style.borderColor = on ? MODES[x.dataset.m].c : ''; }); $('#viabox').hidden = D.mode !== 'flyg'; const ground = ['car', 'bike', 'foot', 'rail'].includes((MODES[D.mode] || MODES.bil).r); $('#routebox').hidden = !ground; $('#rmode').querySelectorAll('[data-r]').forEach(x => { const on = x.dataset.r === D.rmode; x.classList.toggle('on', on); x.style.background = x.style.borderColor = on ? 'var(--sel)' : ''; }); $('#passwrap').hidden = !['auto', 'force'].includes(D.rmode); $('#drawwrap').hidden = D.rmode !== 'draw';
+    $('#rhelp').textContent = { auto: 'Längs väg eller räls. Blir det en orimligt stor omväg visas en rak linje i stället.', force: 'Längs väg eller räls hela vägen, även om den slingrar sig.', straight: 'En rak linje mellan platserna.', draw: D.drawn.length ? `Din egen väg med ${D.drawn.length} punkter.` : 'Du ritar vägen själv på kartan – bra för vandringsleder och smalspår.' }[D.rmode];
+    $('#drawbtn').textContent = D.drawn.length ? 'Ändra den ritade vägen' : 'Rita vägen på kartan'; };
   const renderPass = () => { if (!$('#passes')) return; $('#passes').innerHTML = D.pass.map((v, i) => `<div class="spread" style="padding:4px 0"><span>via ${flag(v.cc)} ${esc(v.name)}</span><button type="button" class="sm" data-rp="${i}" aria-label="Ta bort">✕</button></div>`).join(''); };
   const renderVias = () => { if (!$('#vias')) return; $('#vias').innerHTML = D.via.map((v, i) => `<div class="spread" style="padding:4px 0"><span>${flag(v.cc)} ${esc(v.name)}</span><button type="button" class="sm" data-rv="${i}" aria-label="Ta bort">✕</button></div>`).join(''); };
   if ($('#modes')) {
     $('#modes').onclick = e => { const x = e.target.closest('[data-m]'); if (x) { D.mode = x.dataset.m; renderModes(); } };
     $('#vias').onclick = e => { const x = e.target.closest('[data-rv]'); if (x) { D.via.splice(+x.dataset.rv, 1); renderVias(); } };
     const vin = searchBox($('#vsb'), p => { D.via.push({ name: p.name, lat: p.lat, lon: p.lon, cc: p.cc }); vin.value = ''; renderVias(); }, '+ Lägg till mellanlandning (sök flygplats)');
-    $('#rmode').onclick = e => { const x = e.target.closest('[data-r]'); if (x) { D.straight = x.dataset.r === 'straight'; renderModes(); } };
+    $('#rmode').onclick = e => { const x = e.target.closest('[data-r]'); if (x) { D.rmode = x.dataset.r; renderModes(); if (D.rmode === 'draw' && !D.drawn.length) $('#drawbtn').click(); } };
+    $('#drawbtn').onclick = () => {
+      const prev = s ? (() => { const i = st.findIndex(x => x.id === s.id); return st.slice(0, i).reverse().find(hasPos); })() : [...st].reverse().find(hasPos);
+      if (!prev) { toast('Det finns ingen tidigare plats att rita från'); return; }
+      if (D.lat == null) { toast('Välj platsen först'); return; }
+      const leg = s && legs(t).find(l => l.b.id === s.id);
+      drawRoute(pos(prev), [D.lon, D.lat], D.drawn, leg ? leg.coords : null, (MODES[D.mode] || MODES.bil).c, pts => { D.drawn = pts; if (pts.length) D.rmode = 'draw'; renderModes(); });
+    };
     $('#passes').onclick = e => { const x = e.target.closest('[data-rp]'); if (x) { D.pass.splice(+x.dataset.rp, 1); renderPass(); } };
     const pin = searchBox($('#psb'), p => { D.pass.push({ name: p.name, lat: p.lat, lon: p.lon, cc: p.cc }); pin.value = ''; renderPass(); }, '+ Passera via (sök ort)');
     renderModes(); renderVias(); renderPass();
@@ -944,8 +1036,11 @@ function stopDlg(t, s, preset) {
     D.name = typed; D.geoGuess = false;
     D.date = $('#sd').value; D.travelers = getWho(); if (isFirst) D.mode = '';
     if (D.mode !== 'flyg') D.via = [];
-    if (!['car', 'bike', 'foot', 'rail'].includes((MODES[D.mode] || {}).r)) { D.pass = []; D.straight = false; }
-    if (D.straight) D.pass = [];
+    if (!GROUND.includes((MODES[D.mode] || {}).r)) { D.pass = []; D.rmode = 'auto'; D.drawn = []; }
+    if (D.rmode === 'draw' && !D.drawn.length) D.rmode = 'auto';
+    if (D.rmode !== 'draw') D.drawn = [];
+    if (!['auto', 'force'].includes(D.rmode)) D.pass = [];
+    D.straight = D.rmode === 'straight';
     await saveDoc('stop', D, s && s.id); closeDlg(); render();
   };
   if (s) {
