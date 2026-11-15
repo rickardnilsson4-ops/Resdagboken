@@ -885,6 +885,10 @@ async function play(t, speed, record) {
       P.rec.ondataavailable = e => e.data.size && chunks.push(e.data);
       P.rec.onstop = async () => {
         const blob = new Blob(chunks, { type: mime.split(';')[0] }); if (!blob.size) return;
+        if (!P.finished) return confirmDlg('Inspelningen stoppades', 'Videon blev inte klar. Vill du spara den ändå?', 'Spara ändå', () => keep(blob));
+        await keep(blob);
+      };
+      const keep = async blob => {
         const id = uid(); await idbPut('blobs', blob, 'video:' + id);
         await saveDoc('video', { trip: t.id, created: new Date().toISOString(), mime: mime.split(';')[0], ext: mime.includes('mp4') ? 'mp4' : 'webm', pending: true }, id);
         toast('Videon är sparad i resan'); if (S.view === 'resa') render();
@@ -921,6 +925,7 @@ async function play(t, speed, record) {
   if (P.cancel) return;
   mover.setData(fc([])); cap.innerHTML = `Klart · ${L.length} etapper · ${nf(L.reduce((s, l) => s + l.km, 0))} km`;
   map.fitBounds(boundsOf(all), { padding: 50, maxZoom: 12, duration: 1200 }); await sleep(1800);
+  P.finished = true;
   if (P.rec && P.rec.state !== 'inactive') P.rec.stop();
   P.rec = null; stopPlay();
 }
