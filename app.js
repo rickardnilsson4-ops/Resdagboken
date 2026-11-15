@@ -724,7 +724,7 @@ function viewVarlden(main) {
   const byCat = k => [...allCc].filter(cc => cat(cc) === k).sort((a, b) => cName(a).localeCompare(cName(b), 'sv'));
   main.innerHTML = `<div class="pad">
     <div class="kpis"><div class="kpi" style="background:${BOTH_COLOR}"><b>${both}</b><span>Tillsammans</span></div>${per.slice(0, 2).map(p => `<div class="kpi" style="background:${MEMBER_COLORS[p.i]}"><b>${p.n}</b><span>${esc(p.m.name)} totalt</span></div>`).join('')}</div>
-    <div id="wmapbox" style="margin-top:12px"><div id="wmap"></div></div>
+    <div id="wmapbox" style="margin-top:12px"><div id="wmap"></div></div><p class="small mute" style="margin:6px 0 0">Punkterna är platserna ni varit på, i samma färger som länderna. Tryck på en punkt för namn och resa.</p>
     <div style="margin-top:12px">${groups.map(([k, label]) => { const l = byCat(k); return l.length ? `<div class="cl"><i style="background:${catColor(k)};${k === 'M' ? 'border:2px dashed #6b7a80' : ''}"></i><span><b>${esc(label)} (${l.length}):</b> ${l.map(cc => `${flag(cc)} ${esc(cName(cc))}`).join(', ')}</span></div>` : ''; }).join('') || '<div class="empty">Lägg till platser i en resa så färgas länderna här.</div>'}</div></div>`;
   if (!window.maplibregl) { $('#wmapbox').innerHTML = '<div class="mapmsg">Kartan behöver nät första gången.</div>'; return; }
   if (wmap) { try { wmap.remove(); } catch (e) {} wmap = null; wReady = false; }
@@ -736,8 +736,17 @@ function viewVarlden(main) {
       wmap.addSource('c', { type: 'geojson', data: countries });
       wmap.addLayer({ id: 'cf', type: 'fill', source: 'c', paint: { 'fill-color': ['coalesce', ['get', 'col'], '#f4f1e6'], 'fill-opacity': 0.92 } });
       wmap.addLayer({ id: 'cl', type: 'line', source: 'c', paint: { 'line-color': ['case', ['==', ['get', 'cat'], 'M'], '#6b7a80', '#a8551b'], 'line-width': ['case', ['==', ['get', 'cat'], 'M'], 1.6, 0.4] } });
+      wmap.addSource('pl', { type: 'geojson', data: fc([]) });
+      wmap.addLayer({ id: 'plc', type: 'circle', source: 'pl', paint: {
+        'circle-color': ['get', 'col'],
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 0, ['case', ['get', 'via'], 2, 3], 4, ['case', ['get', 'via'], 3.5, 6], 8, ['case', ['get', 'via'], 5, 9]],
+        'circle-stroke-color': ['case', ['get', 'via'], '#6b7a80', '#ffffff'],
+        'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 0, 1, 6, 2] } });
       wReady = true; paintWorld();
-      wmap.on('click', 'cf', e => { const p = e.features[0].properties; new maplibregl.Popup({ closeButton: false }).setLngLat(e.lngLat).setHTML(`<b>${flag(p.cc)} ${esc(cName(p.cc) || p.name)}</b>`).addTo(wmap); });
+      wmap.on('click', 'plc', e => { const p = e.features[0].properties; new maplibregl.Popup({ closeButton: false }).setLngLat(e.features[0].geometry.coordinates).setHTML(`<b>${esc(p.name)}</b><br><span style="font-size:12px">${esc(p.info)}</span>`).addTo(wmap); });
+      wmap.on('mouseenter', 'plc', () => wmap.getCanvas().style.cursor = 'pointer');
+      wmap.on('mouseleave', 'plc', () => wmap.getCanvas().style.cursor = '');
+      wmap.on('click', 'cf', e => { if (wmap.queryRenderedFeatures(e.point, { layers: ['plc'] }).length) return; const p = e.features[0].properties; new maplibregl.Popup({ closeButton: false }).setLngLat(e.lngLat).setHTML(`<b>${flag(p.cc)} ${esc(cName(p.cc) || p.name)}</b>`).addTo(wmap); });
     });
   }
 }
@@ -746,6 +755,28 @@ function paintWorld() {
   const { cat } = visited();
   countries.features.forEach(f => { const c = cat(f.properties.cc); f.properties.cat = c || ''; f.properties.col = c ? (c === 'M' ? '#ffffff' : catColor(c)) : null; });
   wmap.getSource('c').setData(countries);
+  if (wmap.getSource('pl')) wmap.getSource('pl').setData(fc(placePoints()));
+}
+function placePoints() {
+  const P = new Map(), key = (lat, lon) => lat.toFixed(2) + ',' + lon.toFixed(2);
+  const add = (name, lat, lon, via, tr, trip) => {
+    const k = key(lat, lon);
+    if (!P.has(k)) P.set(k, { name, lat, lon, all: false, ids: new Set(), visited: false, trips: new Set() });
+    const p = P.get(k); p.trips.add(trip);
+    if (via) return;
+    p.visited = true; p.name = name;
+    if (isAll(tr)) p.all = true; else tr.forEach(id => p.ids.add(id));
+  };
+  for (const t of trips()) for (const s of stopsOf(t.id)) {
+    if (hasPos(s)) add(s.data.name, s.data.lat, s.data.lon, false, s.data.travelers || [], t.data.title);
+    for (const v of s.data.via || []) if (v.lat != null) add(v.name, v.lat, v.lon, true, [], t.data.title);
+  }
+  return [...P.values()].map(p => {
+    let cat = 'M';
+    if (p.visited) { const idx = S.members.findIndex(m => p.ids.has(m.user_id)); cat = p.all || (S.members.length > 1 && S.members.every(m => p.ids.has(m.user_id))) || idx < 0 || p.ids.size > 1 ? 'B' : 'm' + idx; }
+    const who = cat === 'B' ? (S.members.length > 2 ? 'Alla' : 'Båda') : cat === 'M' ? 'Mellanlandning' : memberName(S.members[+cat.slice(1)].user_id);
+    return { type: 'Feature', properties: { name: p.name, via: cat === 'M', col: cat === 'M' ? '#ffffff' : catColor(cat), info: who + ' · ' + [...p.trips].join(', ') }, geometry: { type: 'Point', coordinates: [p.lon, p.lat] } };
+  });
 }
 
 function viewTopp(main) {
