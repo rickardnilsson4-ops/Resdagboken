@@ -73,7 +73,7 @@ const ofKind = k => [...S.docs.values()].filter(d => d.kind === k && live(d));
 const trips = () => ofKind('trip').sort((a, b) => (tripRange(b)[0] || b.data.created || '').localeCompare(tripRange(a)[0] || a.data.created || ''));
 const stopsOf = t => ofKind('stop').filter(s => s.data.trip === t).sort((a, b) => (a.data.seq || 0) - (b.data.seq || 0));
 const entriesOf = t => ofKind('entry').filter(e => e.data.trip === t);
-const photosOfTrip = t => ofKind('photo').filter(p => p.data.trip === t);
+const photosOfTrip = t => ofKind('photo').filter(p => { if (p.data.trip !== t) return false; const e = p.data.entry && S.docs.get(p.data.entry); return !p.data.entry || (live(e) && (e.data.photos || []).includes(p.id)); });
 const videosOf = t => ofKind('video').filter(v => v.data.trip === t);
 function tripRange(t) { const ds = ofKind('stop').filter(s => s.data.trip === t.id && s.data.date).map(s => s.data.date).sort(); return [ds[0], ds[ds.length - 1]]; }
 const curTrip = () => { const t = S.docs.get(S.trip); return live(t) ? t : trips()[0]; };
@@ -435,7 +435,7 @@ async function readExif(file) {
     return { lat: x.latitude != null ? +x.latitude.toFixed(5) : null, lon: x.longitude != null ? +x.longitude.toFixed(5) : null, taken: dt instanceof Date && !isNaN(dt) ? dt.toISOString() : null };
   } catch (e) { return {}; }
 }
-async function mediaUrl(id, size = 'thumb') {
+async function mediaUrl(id, size = 'thumb', keep = false) {
   const key = size + ':' + id; if (urlCache.has(key)) return urlCache.get(key);
   let blob = await idbGet('blobs', key);
   if (!blob) {
@@ -443,12 +443,16 @@ async function mediaUrl(id, size = 'thumb') {
     if (!path || !navigator.onLine) return null;
     const { data, error } = await sb.storage.from('media').download(path);
     if (error || !data) return null;
-    blob = data; if (size === 'thumb') await idbPut('blobs', blob, key);
+    blob = data; if (size === 'thumb' || keep) await idbPut('blobs', blob, key);
   }
   const u = URL.createObjectURL(blob); urlCache.set(key, u); return u;
 }
 function hydrate(root = document) {
-  root.querySelectorAll('img[data-photo]:not([src])').forEach(async img => { const u = await mediaUrl(img.dataset.photo, img.dataset.size || 'thumb'); if (u) img.src = u; });
+  root.querySelectorAll('img[data-photo]:not([src])').forEach(async img => {
+    const size = img.dataset.size || 'thumb';
+    if (size === 'cover') { const t = await mediaUrl(img.dataset.photo, 'thumb'); if (t && !img.src) img.src = t; const f = await mediaUrl(img.dataset.photo, 'full', true); if (f) img.src = f; return; }
+    const u = await mediaUrl(img.dataset.photo, size); if (u) img.src = u;
+  });
 }
 
 /* ---------------- synk ---------------- */
@@ -667,10 +671,35 @@ function tripDlg(t) {
     <label for="tt">Namn</label><input id="tt" required value="${esc(t ? t.data.title : '')}" placeholder="t.ex. Rivieran 2027">
     ${!t && homeOf() ? `<label style="display:flex;gap:10px;align-items:center;font-weight:600"><input type="checkbox" id="th" checked style="width:22px;min-height:22px"> Resan startar hemma i ${esc(homeOf().name)}</label><label for="tdd">Avresedatum</label><input id="tdd" type="date" value="${today()}">` : ''}
     <label for="ta">Länk till fotoalbum (valfritt)</label><input id="ta" type="url" value="${esc(t ? t.data.album || '' : '')}" placeholder="Delad länk från Google Foto eller iCloud">
+    ${t && photosOfTrip(t.id).length ? `<label>Omslagsbild</label><div class="covstrip" id="covs"><button type="button" class="cvauto" data-cv="">Auto</button>${photosOfTrip(t.id).map(p => `<button type="button" data-cv="${p.id}"><img data-photo="${p.id}" alt=""></button>`).join('')}</div>
+    <div id="covprev" class="covprev" hidden><img data-size="cover" alt=""><span>Dra i bilden för att välja vilken del som syns</span></div>` : ''}
     <div class="row end" style="margin-top:16px">${t ? '<button type="button" id="del">Ta bort</button>' : ''}<button type="button" data-close>Avbryt</button><button class="pri">Spara</button></div></form>`);
+  const C = { id: t && t.data.cover && photosOfTrip(t.id).some(p => p.id === t.data.cover) ? t.data.cover : '', x: 50, y: 50 };
+  if (t && t.data.coverPos && C.id) { const m = t.data.coverPos.match(/([\d.]+)% ([\d.]+)%/); if (m) { C.x = +m[1]; C.y = +m[2]; } }
+  if ($('#covs')) {
+    hydrate(b);
+    const img = $('#covprev img'), showC = () => {
+      $('#covs').querySelectorAll('[data-cv]').forEach(x => x.classList.toggle('on', x.dataset.cv === C.id));
+      $('#covprev').hidden = !C.id;
+      if (C.id && img.dataset.photo !== C.id) { img.removeAttribute('src'); img.dataset.photo = C.id; hydrate($('#covprev')); }
+      img.style.objectPosition = `${C.x}% ${C.y}%`;
+    };
+    $('#covs').onclick = e => { const x = e.target.closest('[data-cv]'); if (!x) return; if (x.dataset.cv !== C.id) { C.id = x.dataset.cv; C.x = 50; C.y = 50; } showC(); };
+    let drag = null;
+    img.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, cx: C.x, cy: C.y }; img.setPointerCapture(e.pointerId); e.preventDefault(); });
+    img.addEventListener('pointermove', e => {
+      if (!drag) return; const r = img.getBoundingClientRect(), nw = img.naturalWidth || r.width, nh = img.naturalHeight || r.height;
+      const sc = Math.max(r.width / nw, r.height / nh), ox = nw * sc - r.width, oy = nh * sc - r.height;
+      if (ox > 1) C.x = Math.min(100, Math.max(0, drag.cx - (e.clientX - drag.x) / ox * 100));
+      if (oy > 1) C.y = Math.min(100, Math.max(0, drag.cy - (e.clientY - drag.y) / oy * 100));
+      img.style.objectPosition = `${C.x}% ${C.y}%`;
+    });
+    ['pointerup', 'pointercancel'].forEach(k => img.addEventListener(k, () => drag = null));
+    showC();
+  }
   $('#f', b).onsubmit = async e => {
     e.preventDefault(); const title = $('#tt').value.trim(); if (!title) return;
-    const d = await saveDoc('trip', { title, album: $('#ta').value.trim(), created: t ? t.data.created : new Date().toISOString() }, t && t.id);
+    const d = await saveDoc('trip', { title, album: $('#ta').value.trim(), created: t ? t.data.created : new Date().toISOString(), ...(t && $('#covs') ? { cover: C.id || null, coverPos: C.id ? `${C.x.toFixed(0)}% ${C.y.toFixed(0)}%` : null } : {}) }, t && t.id);
     if (!t && $('#th') && $('#th').checked) { const h = homeOf(); await saveDoc('stop', { trip: d.id, name: h.name, sub: h.sub || '', lat: h.lat, lon: h.lon, cc: h.cc, date: $('#tdd').value, mode: '', travelers: allIds(), via: [], seq: 1 }); }
     S.trip = d.id; idbPut('kv', d.id, 'trip'); closeDlg(); if (!t) location.hash = 'resa'; render();
   };
@@ -744,10 +773,10 @@ function viewResor(main) {
     const ccs = [...new Set(st.map(s => s.data.cc).filter(Boolean))];
     const [a, b] = tripRange(t);
     const phs = photosOfTrip(t.id).sort((x, y) => (x.data.date || x.data.taken || '').localeCompare(y.data.date || y.data.taken || ''));
-    const cover = t.data.cover && live(S.docs.get(t.data.cover)) ? t.data.cover : phs[0] && phs[0].id;
+    const cover = t.data.cover && phs.some(p => p.id === t.data.cover) ? t.data.cover : phs[0] && phs[0].id;
     const dates = a ? `${fmtShort(a)}${b && b !== a ? ' – ' + fmtShort(b) : ''} ${yr(b || a)}` : 'Inga datum';
     return `<div class="tcard" role="button" tabindex="0" data-t="${t.id}">
-      <div class="cover">${cover ? `<img data-photo="${cover}" alt="" loading="lazy">` : `<div class="nocover">${ccs.slice(0, 5).map(flag).join(' ') || '🧭'}</div>`}</div>
+      <div class="cover">${cover ? `<img data-photo="${cover}" data-size="cover" alt="" style="object-position:${cover === t.data.cover && t.data.coverPos ? esc(t.data.coverPos) : '50% 50%'}">` : `<div class="nocover">${ccs.slice(0, 5).map(flag).join(' ') || '🧭'}</div>`}</div>
       <div class="tb"><div class="spread"><b class="tt">${esc(t.data.title)}</b>${personDots(tripTravelers(t))}</div>
       <div class="small mute">${esc(dates)}</div>
       <div class="small">${ccs.length ? ccs.map(flag).join(' ') + ' · ' : ''}${nf(km)} km · ${st.length} platser${phs.length ? ` · ${phs.length} bilder` : ''}</div>
