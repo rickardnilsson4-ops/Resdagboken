@@ -210,26 +210,48 @@ async function fetchRoute(a, b) {
   const m = MODES[b.data.mode] || MODES.bil, P = [pos(a), ...(b.data.pass || []).map(v => [v.lon, v.lat]), pos(b)];
   if (m.r === 'car' || m.r === 'bike' || m.r === 'foot') {
     const prof = { car: 'routed-car', bike: 'routed-bike', foot: 'routed-foot' }[m.r];
-    const r = await fetch(`https://routing.openstreetmap.de/${prof}/route/v1/driving/${P.map(p => p.join(',')).join(';')}?overview=full&geometries=geojson`);
+    const r = await fetch(`https://routing.openstreetmap.de/${prof}/route/v1/driving/${P.map(p => p.join(',')).join(';')}?overview=full&geometries=geojson`, { signal: AbortSignal.timeout(30000) });
     if (!r.ok) throw new Error('route ' + r.status);
     const j = await r.json(); return j.routes && j.routes[0] && j.routes[0].geometry.coordinates;
   }
   if (m.r === 'rail') {
-    const r = await fetch(`https://brouter.de/brouter?lonlats=${P.map(p => p.join(',')).join('|')}&profile=rail&alternativeidx=0&format=geojson`);
+    const r = await fetch(`https://brouter.de/brouter?lonlats=${P.map(p => p.join(',')).join('|')}&profile=rail&alternativeidx=0&format=geojson`, { signal: AbortSignal.timeout(30000) });
     if (!r.ok) throw new Error('rail ' + r.status);
     const j = await r.json(); const c = j.features && j.features[0] && j.features[0].geometry.coordinates;
     return c && c.map(p => [p[0], p[1]]);
   }
   return null;
 }
+async function locateTyped() {
+  for (const t of trips()) {
+    const st = stopsOf(t.id);
+    for (let i = 0; i < st.length; i++) {
+      const s = st[i], q = (s.data.name || '').trim();
+      if (hasPos(s) || !q || s.data.geo_fail === q) continue;
+      const nb = [...st.slice(0, i).reverse(), ...st.slice(i + 1)].find(hasPos);
+      let hit = null;
+      try { hit = (await searchPlaces(q, nb ? pos(nb) : (homeOf() ? [homeOf().lon, homeOf().lat] : null)))[0]; } catch (e) { if (!navigator.onLine) return; }
+      if (hit) await saveDoc('stop', { lat: hit.lat, lon: hit.lon, cc: hit.cc, sub: hit.sub, geoGuess: true, geo_fail: null }, s.id);
+      else await saveDoc('stop', { geo_fail: q }, s.id);
+      if (S.view === 'etapper' || S.view === 'karta') render();
+      await sleep(1100);
+    }
+  }
+}
 async function nameCheckins() {
+  await locateTyped();
   for (const st of ofKind('stop').filter(x => x.data.needsName && hasPos(x))) {
     const r = await reverseCountry(st.data.lat, st.data.lon); if (!r) continue;
     await saveDoc('stop', { ...(r.name && /^Plats /.test(st.data.name || '') ? { name: r.name } : {}), cc: r.cc || st.data.cc, needsName: false }, st.id);
     await sleep(1100);
   }
 }
+let routeBusy = false, routeAgain = false;
 async function routePending() {
+  if (routeBusy) { routeAgain = true; return; } routeBusy = true;
+  try { do { routeAgain = false; await routeWork(); } while (routeAgain); } finally { routeBusy = false; }
+}
+async function routeWork() {
   await nameCheckins();
   for (const t of trips()) {
     const st = stopsOf(t.id).filter(hasPos);
@@ -257,8 +279,8 @@ function simplify(c, tol = 0.0004) {
 }
 
 /* ---------------- platssökning ---------------- */
-async function searchPlaces(q) {
-  const r = await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=8&lang=en`);
+async function searchPlaces(q, near) {
+  const r = await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=8&lang=en${near ? `&lat=${near[1]}&lon=${near[0]}&location_bias_scale=0.3` : ''}`, { signal: AbortSignal.timeout(15000) });
   if (!r.ok) throw new Error('search');
   const j = await r.json();
   return (j.features || []).map(f => {
@@ -673,7 +695,7 @@ function viewEtapper(main, t) {
     const via = (s.data.via || []).map(v => v.name).join(', ');
     html += `<div class="leg srow" data-s="${s.id}"><span class="grip" aria-label="Dra för att flytta" role="button" tabindex="-1">≡</span><div class="bar" style="background:${i ? m.c : '#13242e'}"></div>
       <div class="open"><div class="t">${i ? `${esc(st[i - 1].data.name)} → ` : ''}${esc(s.data.name)} ${flag(s.data.cc)}</div>
-      <div class="s">${i ? esc(m.n) : 'Start'}${l ? ' · ' + nf(l.km) + ' km' : ''}${via ? ` · <span class="via">mellanlandning ${esc(via)}</span>` : ''}${!hasPos(s) ? ' · <b>saknar position</b>' : ''}${i && s.data.straight ? ' · rak linje' : ''}${i && (s.data.pass || []).length ? ` · via ${esc(s.data.pass.map(v => v.name).join(', '))}` : ''}${l && l.detour ? ' · <span class="via">vägen blev en stor omväg – rak linje visas</span>' : ''}</div></div>
+      <div class="s">${i ? esc(m.n) : 'Start'}${l ? ' · ' + nf(l.km) + ' km' : ''}${via ? ` · <span class="via">mellanlandning ${esc(via)}</span>` : ''}${!hasPos(s) ? (s.data.geo_fail === (s.data.name || '').trim() ? ' · <b>hittades inte – tryck och sök</b>' : ' · <b>saknar position</b> – söks upp när du har nät') : ''}${s.data.geoGuess ? ' · <span class="via">plats hittad automatiskt – tryck och kontrollera</span>' : ''}${i && s.data.straight ? ' · rak linje' : ''}${i && (s.data.pass || []).length ? ` · via ${esc(s.data.pass.map(v => v.name).join(', '))}` : ''}${l && l.detour ? ' · <span class="via">vägen blev en stor omväg – rak linje visas</span>' : ''}</div></div>
       <div class="open">${whoBadge(s.data.travelers)}</div></div>`;
   });
   main.innerHTML = html + '</div></div>';
@@ -812,7 +834,8 @@ function stopDlg(t, s, preset) {
   $('#ok').onclick = async () => {
     const typed = inp.value.trim();
     if (!typed) { toast('Skriv eller sök en plats'); return; }
-    D.name = typed;
+    if (s && typed !== (s.data.name || '') && D.lat === s.data.lat && D.lon === s.data.lon && s.data.geoGuess) { D.lat = D.lon = null; D.cc = ''; }
+    D.name = typed; D.geoGuess = false;
     D.date = $('#sd').value; D.travelers = getWho(); if (isFirst) D.mode = '';
     if (D.mode !== 'flyg') D.via = [];
     if (!['car', 'bike', 'foot', 'rail'].includes((MODES[D.mode] || {}).r)) { D.pass = []; D.straight = false; }

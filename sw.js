@@ -1,7 +1,7 @@
 // Service worker: appen och kartbitar fungerar offline.
-const VERSION = 'v15';
+const VERSION = 'v16';
 const SHELL = 'shell-' + VERSION, LIBS = 'libs-' + VERSION, TILES = 'tiles-v1';
-const SHELL_FILES = ['./', './index.html', './styles.css?v=5', './app.js?v=15', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
+const SHELL_FILES = ['./', './index.html', './styles.css?v=5', './app.js?v=16', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
 const LIB_HOSTS = ['cdn.jsdelivr.net', 'fonts.googleapis.com', 'fonts.gstatic.com'];
 const TILE_HOSTS = ['tiles.openfreemap.org'];
 const MAX_TILES = 6000;
