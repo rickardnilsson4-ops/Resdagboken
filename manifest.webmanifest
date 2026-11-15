@@ -3,7 +3,7 @@
   "short_name": "Resdagboken",
   "description": "Resdagbok med karta, färdmedel, bilder och dagbok",
   "lang": "sv",
-  "start_url": "./#karta",
+  "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "background_color": "#fbfbf2",

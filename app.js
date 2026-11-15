@@ -39,7 +39,13 @@ const lineKm = cs => { let s = 0; for (let i = 1; i < cs.length; i++) s += hav(c
 let regionNames; try { regionNames = new Intl.DisplayNames(['sv'], { type: 'region' }); } catch (e) {}
 const cName = cc => { try { return regionNames ? regionNames.of(cc) : cc; } catch (e) { return cc; } };
 const flag = cc => cc && cc.length === 2 ? String.fromCodePoint(...[...cc.toUpperCase()].map(c => c.charCodeAt(0) + 127397)) : '';
-function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), ms); }
+function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.remove('act'); t.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), ms); }
+
+function toastAction(msg, label, fn, ms = 7000) {
+  const t = $('#toast'); t.innerHTML = `<span>${esc(msg)}</span><button type="button">${esc(label)}</button>`; t.classList.add('show', 'act');
+  t.querySelector('button').onclick = () => { t.classList.remove('show', 'act'); clearTimeout(toast.t); fn(); };
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show', 'act'), ms);
+}
 
 /* ---------------- IndexedDB ---------------- */
 let dbp;
@@ -61,7 +67,7 @@ const idbAll = s => idb(s, 'readonly', o => o.getAll());
 const idbClear = s => idb(s, 'readwrite', o => o.clear());
 
 /* ---------------- tillstånd ---------------- */
-const S = { user: null, group: null, joinCode: '', members: [], docs: new Map(), trip: null, view: 'karta', lastPull: null, syncing: false, lastSync: null, syncErr: '' };
+const S = { user: null, group: null, joinCode: '', members: [], docs: new Map(), trip: null, view: 'resor', lastPull: null, syncing: false, lastSync: null, syncErr: '' };
 const live = d => d && !d.deleted;
 const ofKind = k => [...S.docs.values()].filter(d => d.kind === k && live(d));
 const trips = () => ofKind('trip').sort((a, b) => (tripRange(b)[0] || b.data.created || '').localeCompare(tripRange(a)[0] || a.data.created || ''));
@@ -85,6 +91,18 @@ const allLabel = () => persons().length > 2 ? 'Alla' : 'Båda';
 const initials = n => (n || '?').split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
 const travelersOf = tr => { const ids = allIds(); if (!tr || !tr.length) return ids; const r = [...new Set(tr.map(toPid).filter(Boolean))]; return r.length ? r : ids; };
 const isAll = tr => { const ids = allIds(), t = travelersOf(tr); return ids.every(id => t.includes(id)); };
+const sameSet = (a, b) => a.length === b.length && a.every(x => b.includes(x));
+function personDots(ids) {
+  if (persons().length <= 1 || !ids || !ids.length) return '';
+  return `<span class="pdots" aria-label="${esc(ids.map(personName).join(', '))}">${ids.map(id => `<span class="pdot" style="background:${personColor(id)}" title="${esc(personName(id))}">${esc(initials(personName(id)))}</span>`).join('')}</span>`;
+}
+function tripTravelers(t) {
+  const n = new Map();
+  stopsOf(t.id).forEach(s => { const k = travelersOf(s.data.travelers).slice().sort().join(','); n.set(k, (n.get(k) || 0) + 1); });
+  const best = [...n.entries()].sort((a, b) => b[1] - a[1])[0];
+  return best ? best[0].split(',').filter(Boolean) : allIds();
+}
+function whoDiff(tr, def) { const ids = travelersOf(tr); return def && sameSet(ids, def) ? '' : personDots(ids); }
 function whoBadge(tr) {
   if (persons().length <= 1) return '';
   const ids = travelersOf(tr);
@@ -161,6 +179,17 @@ async function saveDoc(kind, data, id) {
   const d = { id: id || uid(), kind, data: old ? { ...old.data, ...data } : data, deleted: false, dirty: 1, updated_at: old ? old.updated_at : null };
   S.docs.set(d.id, d); await idbPut('docs', d); scheduleSync(); return d;
 }
+async function removeWithUndo(topId, childIds, msg) {
+  const batch = uid(), at = new Date().toISOString();
+  const ids = [topId, ...childIds].filter(id => live(S.docs.get(id)));
+  for (const id of ids) { const d = S.docs.get(id); d.data = { ...d.data, del_batch: batch, del_at: at, del_top: id === topId }; d.deleted = true; d.dirty = 1; await idbPut('docs', d); }
+  scheduleSync(); render();
+  toastAction(msg, 'Ångra', () => restoreBatch(batch));
+}
+async function restoreBatch(batch) {
+  for (const d of [...S.docs.values()].filter(d => d.deleted && d.data && d.data.del_batch === batch)) { const { del_batch, del_at, del_top, ...rest } = d.data; d.data = rest; d.deleted = false; d.dirty = 1; await idbPut('docs', d); }
+  scheduleSync(); render(); toast('Återställt');
+}
 async function deleteDoc(id) { const d = S.docs.get(id); if (!d) return; d.deleted = true; d.dirty = 1; await idbPut('docs', d); scheduleSync(); }
 
 /* ---------------- geometri ---------------- */
@@ -233,7 +262,7 @@ async function locateTyped() {
       try { hit = (await searchPlaces(q, nb ? pos(nb) : (homeOf() ? [homeOf().lon, homeOf().lat] : null)))[0]; } catch (e) { if (!navigator.onLine) return; }
       if (hit) await saveDoc('stop', { lat: hit.lat, lon: hit.lon, cc: hit.cc, sub: hit.sub, geoGuess: true, geo_fail: null }, s.id);
       else await saveDoc('stop', { geo_fail: q }, s.id);
-      if (S.view === 'etapper' || S.view === 'karta') render();
+      if (S.view === 'resa') render();
       await sleep(1100);
     }
   }
@@ -372,6 +401,22 @@ async function uploadMedia() {
     } catch (e) { S.syncErr = 'Kunde inte ladda upp: ' + (e.message || e); }
   }
 }
+const docLabel = d => d.kind === 'trip' ? 'Resan ' + (d.data.title || '') : d.kind === 'stop' ? 'Platsen ' + (d.data.name || '') : d.kind === 'entry' ? 'Inlägget ' + (d.data.title || 'utan rubrik') : d.kind === 'person' ? 'Personen ' + (d.data.name || '') : d.kind === 'home' ? 'Hem' : 'En uppgift';
+async function checkConflicts(list) {
+  if (!list.length) return;
+  for (let i = 0; i < list.length; i += 100) {
+    const part = list.slice(i, i + 100);
+    const { data, error } = await sb.from('docs').select('id,kind,data,deleted,updated_at').in('id', part.map(d => d.id));
+    if (error || !data) continue;
+    for (const r of data) {
+      const loc = S.docs.get(r.id); if (!loc || !loc.updated_at || r.updated_at <= loc.updated_at) continue;
+      if (JSON.stringify(r.data) === JSON.stringify(loc.data) && !!r.deleted === !!loc.deleted) continue;
+      await saveDoc('conflict', { of: r.id, kind: r.kind, other: r.data, other_deleted: !!r.deleted, other_at: r.updated_at, mine: loc.data, label: docLabel(loc), by: S.user.id, at: new Date().toISOString() });
+      loc.updated_at = r.updated_at;
+      toast(`${docLabel(loc)} ändrades på två ställen samtidigt. Båda versionerna är sparade – se Mer.`, 6000);
+    }
+  }
+}
 async function sync() {
   if (S.syncing || !S.user || !S.group) return updateSyncLabel();
   if (!navigator.onLine) return updateSyncLabel();
@@ -380,10 +425,16 @@ async function sync() {
     await uploadMedia();
     const dirty = [...S.docs.values()].filter(d => d.dirty);
     if (dirty.length) {
+      await checkConflicts(dirty.filter(d => d.updated_at && d.kind !== 'conflict'));
       const rows = dirty.map(d => ({ id: d.id, group_id: S.group, kind: d.kind, data: d.data, deleted: !!d.deleted }));
-      const { error } = await sb.from('docs').upsert(rows);
-      if (error) throw error;
-      for (const d of dirty) { const cur = S.docs.get(d.id); if (cur === d) { d.dirty = 0; await idbPut('docs', d); } }
+      const res = await sb.from('docs').upsert(rows).select('id,updated_at');
+      if (res.error) throw res.error;
+      const stamp = new Map((res.data || []).map(r => [r.id, r.updated_at]));
+      for (const d of dirty) {
+        const cur = S.docs.get(d.id), ts = stamp.get(d.id);
+        if (cur === d) { d.dirty = 0; if (ts) d.updated_at = ts; await idbPut('docs', d); }
+        else if (cur && ts) { cur.updated_at = ts; await idbPut('docs', cur); }
+      }
     }
     let q = sb.from('docs').select('id,kind,data,deleted,updated_at').eq('group_id', S.group).order('updated_at', { ascending: true }).limit(1000);
     if (S.lastPull) q = q.gt('updated_at', S.lastPull);
@@ -467,6 +518,16 @@ async function afterLogin(user) {
   if (inviteCode()) { clearInvite(); setTimeout(() => toast('Du är redan med i en dagbok'), 800); }
   startApp(); sync();
 }
+async function safeLogout() {
+  if (navigator.onLine) await sync();
+  const n = pendingCount(), media = [...S.docs.values()].filter(d => live(d) && d.data.pending).length;
+  if (!n && !media) return confirmDlg('Logga ut?', 'Allt är synkat och finns kvar när du loggar in igen.', 'Logga ut', logout);
+  openDlg(`<h2>Allt är inte synkat</h2><p>${n} ${n === 1 ? 'ändring' : 'ändringar'}${media ? ` och ${media} bilder eller videor` : ''} finns bara på den här telefonen. Loggar du ut nu försvinner de.</p><p class="small mute">Vänta tills du har nät och tryck Synka nu, eller ladda ner en kopia först.</p>
+    <div class="row end"><button id="lexp">Ladda ner kopia</button><button data-close class="pri">Logga inte ut</button></div><button id="lforce" class="ghost small" style="margin-top:10px;color:#b00020;width:100%">Logga ut ändå och ta bort det osynkade</button>`);
+  $('#lexp').onclick = exportAll;
+  $('#lforce').onclick = () => { closeDlg(); logout(); };
+}
+function exportAll() { const data = JSON.stringify({ exported: new Date().toISOString(), docs: [...S.docs.values()].map(d => ({ id: d.id, kind: d.kind, data: d.data, deleted: !!d.deleted })) }, null, 1); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([data], { type: 'application/json' })); a.download = `resdagboken-${today()}.json`; a.click(); }
 async function logout() {
   await sb.auth.signOut().catch(() => {});
   await Promise.all(['docs', 'kv', 'blobs'].map(idbClear));
@@ -474,8 +535,9 @@ async function logout() {
 }
 
 /* ---------------- skal ---------------- */
-const VIEWS = [['karta', 'Karta'], ['etapper', 'Etapper'], ['dagbok', 'Dagbok'], ['varlden', 'Världen'], ['topp', 'Topplistor'], ['mer', 'Mer']];
-let shellBuilt = false;
+const VIEWS = [['resor', 'Resor'], ['dagbok', 'Dagbok'], ['statistik', 'Statistik'], ['mer', 'Mer']];
+const STAT = [['varlden', 'Världen'], ['topp', 'Topplistor'], ['pass', 'Pass']];
+let shellBuilt = false, statView = 'varlden';
 function startApp() {
   if (!shellBuilt) {
     $('#app').innerHTML = `<div id="shell"><header id="top"></header><main id="main"></main><nav id="nav">${VIEWS.map(([k, n]) => `<a href="#${k}" data-v="${k}">${n}</a>`).join('')}</nav></div>`;
@@ -483,28 +545,42 @@ function startApp() {
   }
   render();
 }
-window.addEventListener('hashchange', () => { if (shellBuilt) render(); });
+window.addEventListener('hashchange', () => { if (shellBuilt) { render(); const m = $('#main'); if (m) m.scrollTop = 0; } });
 function render() {
   if (!shellBuilt) return;
-  const v = (location.hash.slice(1) || 'karta'); S.view = VIEWS.some(x => x[0] === v) || v === 'pass' ? v : 'karta';
-  document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('on', a.dataset.v === S.view));
+  let v = location.hash.slice(1) || 'resor';
+  if (v === 'karta' || v === 'etapper') v = 'resa';
+  if (v === 'statistik') v = statView;
+  if (!['resor', 'resa', 'dagbok', 'mer', ...STAT.map(x => x[0])].includes(v)) v = 'resor';
+  S.view = v;
+  const isStat = STAT.some(x => x[0] === v); if (isStat) statView = v;
+  const navKey = v === 'resa' ? 'resor' : isStat ? 'statistik' : v;
+  document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('on', a.dataset.v === navKey));
   const t = curTrip(); if (t) S.trip = t.id;
-  const tripView = ['karta', 'etapper', 'dagbok'].includes(S.view);
-  $('#top').innerHTML = tripView
-    ? `<select id="tsel" aria-label="Välj resa">${trips().map(x => `<option value="${x.id}" ${t && x.id === t.id ? 'selected' : ''}>${esc(x.data.title)}</option>`).join('') || '<option>Ingen resa ännu</option>'}</select>
-       ${t ? '<button class="sm" id="tedit" aria-label="Ändra resa">Ändra</button>' : ''}<button class="sm pri" id="tnew">+ Resa</button><span id="sync"></span>`
-    : `${S.view === 'pass' ? '<a href="#varlden" class="btn sm" aria-label="Tillbaka">←</a>' : ''}<h2 style="flex:1">${S.view === 'pass' ? 'Pass och utmärkelser' : VIEWS.find(x => x[0] === S.view)[1]}</h2><span id="sync"></span>`;
+  let top;
+  if (v === 'resor') top = `<h2 style="flex:1">Resor</h2><button class="sm pri" id="tnew">+ Resa</button>`;
+  else if (v === 'resa') top = `<a href="#resor" class="btn sm" aria-label="Alla resor">‹ Resor</a><h2 class="ttl">${t ? esc(t.data.title) : ''}</h2>${t ? '<button class="sm" id="tedit">Ändra</button>' : ''}`;
+  else if (v === 'dagbok') top = `<select id="tsel" aria-label="Välj resa">${trips().map(x => `<option value="${x.id}" ${t && x.id === t.id ? 'selected' : ''}>${esc(x.data.title)}</option>`).join('') || '<option>Ingen resa ännu</option>'}</select>`;
+  else top = `<h2 style="flex:1">${isStat ? 'Statistik' : 'Mer'}</h2>`;
+  $('#top').innerHTML = top + '<span id="sync"></span>';
   updateSyncLabel();
   if ($('#tsel')) $('#tsel').onchange = e => { S.trip = e.target.value; idbPut('kv', S.trip, 'trip'); stopPlay(); render(); };
   if ($('#tnew')) $('#tnew').onclick = () => tripDlg();
   if ($('#tedit')) $('#tedit').onclick = () => tripDlg(curTrip());
-  const main = $('#main');
-  if (S.view !== 'karta') detachMap();
-  if (S.view !== 'varlden' && wmap) { try { wmap.remove(); } catch (e) {} wmap = null; wReady = false; }
-  ({ karta: viewKarta, etapper: viewEtapper, dagbok: viewDagbok, varlden: viewVarlden, topp: viewTopp, mer: viewMer, pass: viewPass })[S.view](main, t);
+  let main = $('#main');
+  if (v !== 'resa') detachMap();
+  if (v !== 'varlden' && wmap) { try { wmap.remove(); } catch (e) {} wmap = null; wReady = false; }
+  if (mapHolder && mapHolder.parentNode) mapHolder.remove();
+  if (isStat) {
+    main.innerHTML = `<div class="pad" style="padding-bottom:0"><div class="seg" id="statseg">${STAT.map(([k, n]) => `<button data-h="${k}" class="${k === v ? 'on' : ''}">${n}</button>`).join('')}</div></div><div id="statbody"></div>`;
+    $('#statseg').onclick = e => { const b = e.target.closest('[data-h]'); if (b) location.hash = b.dataset.h; };
+    main = $('#statbody');
+  }
+  ({ resor: viewResor, resa: viewResa, dagbok: viewDagbok, varlden: viewVarlden, topp: viewTopp, mer: viewMer, pass: viewPass })[v](main, t);
+  main.querySelectorAll('[data-newtrip]').forEach(b => b.onclick = () => tripDlg());
   hydrate(main);
 }
-const noTrip = () => `<div class="pad"><div class="empty"><p>Ingen resa ännu.</p><button class="pri" onclick="document.getElementById('tnew').click()">Skapa din första resa</button></div></div>`;
+const noTrip = () => `<div class="pad"><div class="empty"><p>Ingen resa ännu.</p><button class="pri" data-newtrip>Skapa din första resa</button></div></div>`;
 
 /* ---------------- resa ---------------- */
 function tripDlg(t) {
@@ -517,12 +593,12 @@ function tripDlg(t) {
     e.preventDefault(); const title = $('#tt').value.trim(); if (!title) return;
     const d = await saveDoc('trip', { title, album: $('#ta').value.trim(), created: t ? t.data.created : new Date().toISOString() }, t && t.id);
     if (!t && $('#th') && $('#th').checked) { const h = homeOf(); await saveDoc('stop', { trip: d.id, name: h.name, sub: h.sub || '', lat: h.lat, lon: h.lon, cc: h.cc, date: $('#tdd').value, mode: '', travelers: allIds(), via: [], seq: 1 }); }
-    S.trip = d.id; idbPut('kv', d.id, 'trip'); closeDlg(); if (!t) location.hash = 'etapper'; render();
+    S.trip = d.id; idbPut('kv', d.id, 'trip'); closeDlg(); if (!t) location.hash = 'resa'; render();
   };
-  if (t) $('#del').onclick = () => confirmDlg(`Ta bort ”${t.data.title}”?`, 'Resan, dess platser och inlägg tas bort för er båda.', 'Ta bort', async () => {
-    for (const d of [...S.docs.values()].filter(d => d.data && d.data.trip === t.id)) await deleteDoc(d.id);
-    await deleteDoc(t.id); S.trip = null; render();
-  });
+  if (t) $('#del').onclick = async () => {
+    closeDlg(); S.trip = null; if (S.view === 'resa') location.hash = 'resor';
+    await removeWithUndo(t.id, [...S.docs.values()].filter(d => d.data && d.data.trip === t.id).map(d => d.id), `”${t.data.title}” är borttagen`);
+  };
 }
 
 /* ---------------- karta ---------------- */
@@ -580,28 +656,96 @@ function drawPhotoMarkers(t) {
     photoMarkers.push(new maplibregl.Marker({ element: el }).setLngLat([ps[0].data.lon, ps[0].data.lat]).addTo(map));
   }
 }
-function viewKarta(main, t) {
-  if (!t) { main.innerHTML = noTrip(); return; }
-  const L = legs(t), vids = videosOf(t.id);
-  main.innerHTML = `<div id="mapslot"></div><div class="pad">
-    <button id="chk" style="width:100%;margin-bottom:8px">Checka in här</button>
-    <div class="row"><button class="pri" id="play" style="flex:1">Spela upp resan</button><button id="rec" style="flex:1">Spara som video</button></div>
-    <div class="row" style="margin-top:8px"><span class="small mute">Fart</span><div class="seg" id="speed" style="flex:1"><button data-s="0.6">Lugn</button><button data-s="1" class="on">Normal</button><button data-s="2">Snabb</button></div></div>
-    <div class="legend">${Object.values(MODES).map(m => `<span><svg width="24" height="8" aria-hidden="true"><line x1="2" y1="4" x2="22" y2="4" stroke="${m.c}" stroke-width="${m.w}" stroke-linecap="round" ${m.d === 'dash' ? 'stroke-dasharray="7 4"' : m.d === 'dot' ? 'stroke-dasharray="0.1 7"' : ''}/></svg>${m.n}</span>`).join('')}</div>
-    <p class="small mute">${L.length} etapper · ${nf(L.reduce((s, l) => s + l.km, 0))} km${L.some(l => !l.routed && !l.detour && !l.b.data.straight && ['car', 'bike', 'foot', 'rail'].includes(l.m.r)) ? ' · vissa rutter räknas ut när du är uppkopplad' : ''}</p>
-    ${vids.length ? `<h3 style="margin-top:12px">Videor</h3>${vids.map(v => `<div class="spread card" style="padding:10px 14px;margin:8px 0 0"><span>${esc(new Date(v.data.created).toLocaleString('sv-SE', { dateStyle: 'medium', timeStyle: 'short' }))}${v.data.pending ? ' <span class="small mute">· laddas upp</span>' : ''}</span><button class="sm" data-vid="${v.id}">Visa</button></div>`).join('')}` : ''}
-  </div>`;
+function viewResor(main) {
+  const ts = trips();
+  if (!ts.length) { main.innerHTML = noTrip(); return; }
+  const yr = d => d ? d.slice(0, 4) : '';
+  main.innerHTML = `<div class="pad tcards">${ts.map(t => {
+    const st = stopsOf(t.id), L = legs(t), km = L.reduce((a, l) => a + l.km, 0);
+    const ccs = [...new Set(st.map(s => s.data.cc).filter(Boolean))];
+    const [a, b] = tripRange(t);
+    const phs = photosOfTrip(t.id).sort((x, y) => (x.data.date || x.data.taken || '').localeCompare(y.data.date || y.data.taken || ''));
+    const cover = t.data.cover && live(S.docs.get(t.data.cover)) ? t.data.cover : phs[0] && phs[0].id;
+    const dates = a ? `${fmtShort(a)}${b && b !== a ? ' – ' + fmtShort(b) : ''} ${yr(b || a)}` : 'Inga datum';
+    return `<button class="tcard" data-t="${t.id}">
+      <div class="cover">${cover ? `<img data-photo="${cover}" alt="" loading="lazy">` : `<div class="nocover">${ccs.slice(0, 5).map(flag).join(' ') || '🧭'}</div>`}</div>
+      <div class="tb"><div class="spread"><b class="tt">${esc(t.data.title)}</b>${personDots(tripTravelers(t))}</div>
+      <div class="small mute">${esc(dates)}</div>
+      <div class="small">${ccs.length ? ccs.map(flag).join(' ') + ' · ' : ''}${nf(km)} km · ${st.length} platser${phs.length ? ` · ${phs.length} bilder` : ''}</div></div></button>`;
+  }).join('')}</div>`;
+  main.querySelectorAll('[data-t]').forEach(b => b.onclick = () => { S.trip = b.dataset.t; idbPut('kv', S.trip, 'trip'); location.hash = 'resa'; });
+}
+function addMenu(t) {
+  const home = homeOf(), st = stopsOf(t.id), lastSt = st[st.length - 1];
+  const homeBtn = home && lastSt && !(hasPos(lastSt) && hav(pos(lastSt), [home.lon, home.lat]) < 5);
+  openDlg(`<h2>Lägg till</h2><div class="menu">
+    <button data-a="stop"><b>${st.length ? 'Ny plats' : 'Startplats'}</b><span>Sök ort, adress, flygplats eller sevärdhet</span></button>
+    <button data-a="chk"><b>Checka in här</b><span>Platsen där du står just nu</span></button>
+    <button data-a="fl"><b>Flyg</b><span>Fyll i med flygnummer, även flera flyg</span></button>
+    ${homeBtn ? `<button data-a="home"><b>Hemresa</b><span>Tillbaka till ${esc(home.name)}</span></button>` : ''}
+    <button data-a="entry"><b>Dagboksinlägg</b><span>Text, betyg och bilder</span></button></div>
+    <div class="row end"><button data-close>Avbryt</button></div>`);
+  $('#box').querySelector('.menu').onclick = e => {
+    const b = e.target.closest('[data-a]'); if (!b) return; closeDlg();
+    ({ stop: () => stopDlg(t, null), chk: () => checkIn(t), fl: () => flightDlg(t), home: () => stopDlg(t, null, home), entry: () => entryDlg(t, null) })[b.dataset.a]();
+  };
+}
+function mountMap(slot, t) {
+  if (map && mapHolder && mapHolder.dataset.trip === t.id) { slot.replaceWith(mapHolder); try { map.resize(); } catch (e) {} drawTrip(false); return; }
   detachMap();
-  mapHolder = document.createElement('div'); mapHolder.id = 'mapbox'; mapHolder.innerHTML = '<div id="map"></div><div id="cap"></div>';
-  $('#mapslot').replaceWith(mapHolder);
+  mapHolder = document.createElement('div'); mapHolder.id = 'mapbox'; mapHolder.dataset.trip = t.id; mapHolder.innerHTML = '<div id="map"></div><div id="cap"></div>';
+  slot.replaceWith(mapHolder);
   if (!window.maplibregl) mapHolder.innerHTML = '<div class="mapmsg">Kartan kunde inte laddas. Den behöver nät första gången.</div>';
   else ensureMap();
-  let speed = 1;
-  $('#speed').onclick = e => { const b = e.target.closest('[data-s]'); if (!b) return; speed = +b.dataset.s; $('#speed').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); if (playing) playing.speed = speed; };
-  $('#play').onclick = () => playing ? stopPlay() : play(t, speed, false);
-  $('#chk').onclick = () => checkIn(t);
-  $('#rec').onclick = () => playing ? stopPlay() : play(t, speed, true);
+}
+let playSpeed = 1;
+function viewResa(main, t) {
+  if (!t) { main.innerHTML = noTrip(); return; }
+  const st = stopsOf(t.id), L = legs(t), byStop = new Map(L.map(l => [l.b.id, l])), vids = videosOf(t.id);
+  const def = tripTravelers(t), km = L.reduce((s, l) => s + l.km, 0);
+  const pendingRoutes = L.some(l => !l.routed && !l.detour && !l.b.data.straight && ['car', 'bike', 'foot', 'rail'].includes(l.m.r));
+  let list = '', lastDay = null;
+  st.forEach((s, i) => {
+    const day = s.data.date || '';
+    if (day !== lastDay) { list += `<div class="day">${day ? esc(fmtD(day)) : 'Utan datum'}</div>`; lastDay = day; }
+    const l = byStop.get(s.id), m = MODES[s.data.mode] || MODES.bil;
+    const via = (s.data.via || []).map(v => v.name).join(', ');
+    const warn = !hasPos(s) ? (s.data.geo_fail === (s.data.name || '').trim() ? 'Platsen hittades inte' : 'Saknar position – söks upp när du har nät') : s.data.geoGuess ? 'Platsen hittades automatiskt – kontrollera' : l && l.detour ? 'Vägen blev en omväg – rak linje visas' : '';
+    const sub = [i ? esc(m.n) : 'Start', l ? nf(l.km) + ' km' : '', via ? `<span class="via">mellanlandning ${esc(via)}</span>` : '', i && s.data.straight ? 'rak linje' : '', i && (s.data.pass || []).length ? 'via ' + esc(s.data.pass.map(v => v.name).join(', ')) : ''].filter(Boolean).join(' · ');
+    list += `<div class="leg srow" data-s="${s.id}"><span class="grip" aria-label="Dra för att flytta" role="button" tabindex="-1">≡</span><div class="bar" style="background:${i ? m.c : 'var(--sel)'}"></div>
+      <div class="open"><div class="t">${i ? `${esc(st[i - 1].data.name)} → ` : ''}${esc(s.data.name)} ${flag(s.data.cc)}${warn ? ` <span class="warn-i" title="${esc(warn)}" aria-label="${esc(warn)}">⚠</span>` : ''}</div>
+      <div class="s">${sub}</div></div>
+      <div class="open">${whoDiff(s.data.travelers, def)}</div></div>`;
+  });
+  main.innerHTML = `<div id="mapslot"></div><div class="pad">
+    <div class="row playrow"><button class="pri" id="play" style="flex:1">▶ Spela upp</button><button id="rec" style="flex:1">● Spara video</button><div class="seg" id="speed" aria-label="Fart">${[[0.6, 'Lugn'], [1, 'Normal'], [2, 'Snabb']].map(([v, n]) => `<button data-s="${v}" class="${v === playSpeed ? 'on' : ''}">${n}</button>`).join('')}</div></div>
+    <div class="spread" style="margin-top:16px"><div><h3>Etapper</h3><div class="small mute">${st.length} platser · ${nf(km)} km${pendingRoutes ? ' · vissa vägar ritas när du har nät' : ''}</div></div><button class="pri" id="addany">+ Lägg till</button></div>
+    ${persons().length > 1 && st.length ? `<div class="small mute" style="margin-top:6px;display:flex;gap:6px;align-items:center">Reste: ${personDots(def)} <span>– visas bara på rader där det skiljer sig</span></div>` : ''}
+    ${st.length ? '' : '<div class="empty">Börja med platsen ni reste från. Tryck + Lägg till.</div>'}
+    <div id="slist">${list}</div>
+    ${st.length > 1 ? '<p class="small mute" style="margin:8px 0 0">Håll i ≡ och dra för att flytta en plats.</p>' : ''}
+    <details class="legend-d"><summary>Färgförklaring</summary><div class="legend">${Object.values(MODES).map(m => `<span><svg width="24" height="8" aria-hidden="true"><line x1="2" y1="4" x2="22" y2="4" stroke="${m.c}" stroke-width="${m.w}" stroke-linecap="round" ${m.d === 'dash' ? 'stroke-dasharray="7 4"' : m.d === 'dot' ? 'stroke-dasharray="0.1 7"' : ''}/></svg>${m.n}</span>`).join('')}</div></details>
+    ${vids.length ? `<h3 style="margin-top:16px">Videor</h3>${vids.map(v => `<div class="spread card" style="padding:10px 14px;margin:8px 0 0"><span>${esc(new Date(v.data.created).toLocaleString('sv-SE', { dateStyle: 'medium', timeStyle: 'short' }))}${v.data.pending ? ' <span class="small mute">· laddas upp</span>' : ''}</span><button class="sm" data-vid="${v.id}">Visa</button></div>`).join('')}` : ''}
+  </div>`;
+  mountMap($('#mapslot'), t);
+  if (playing) { $(playing.rec ? '#rec' : '#play').textContent = 'Stoppa'; }
+  $('#speed').onclick = e => { const b = e.target.closest('[data-s]'); if (!b) return; playSpeed = +b.dataset.s; $('#speed').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); if (playing) playing.speed = playSpeed; };
+  $('#play').onclick = () => playing ? stopPlay() : play(t, playSpeed, false);
+  $('#rec').onclick = () => playing ? stopPlay() : play(t, playSpeed, true);
+  $('#addany').onclick = () => addMenu(t);
   main.querySelectorAll('[data-vid]').forEach(b => b.onclick = () => showVideo(b.dataset.vid));
+  main.querySelectorAll('.srow .open').forEach(b => b.onclick = () => stopDlg(t, S.docs.get(b.closest('.srow').dataset.s)));
+  if (window.Sortable && st.length > 1) {
+    Sortable.create($('#slist'), {
+      handle: '.grip', draggable: '.srow', animation: 150, ghostClass: 'drag-ghost', forceFallback: true, fallbackTolerance: 3,
+      onEnd: async () => {
+        const ids = [...document.querySelectorAll('#slist .srow')].map(e => e.dataset.s);
+        let changed = false;
+        for (const [i, id] of ids.entries()) { const d = S.docs.get(id); if (d && d.data.seq !== i + 1) { await saveDoc('stop', { seq: i + 1 }, id); changed = true; } }
+        if (changed) { toast('Ordningen är sparad'); render(); }
+      }
+    });
+  }
 }
 function pointAt(coords, cum, f) {
   const target = f * cum[cum.length - 1]; let i = 1; while (i < cum.length - 1 && cum[i] < target) i++;
@@ -611,7 +755,7 @@ function pointAt(coords, cum, f) {
 function stopPlay() {
   if (!playing) return; playing.cancel = true;
   if (playing.rec && playing.rec.state !== 'inactive') playing.rec.stop();
-  playing = null; const p = $('#play'), r = $('#rec'); if (p) p.textContent = 'Spela upp resan'; if (r) r.textContent = 'Spara som video';
+  playing = null; const p = $('#play'), r = $('#rec'); if (p) p.textContent = '▶ Spela upp'; if (r) r.textContent = '● Spara video';
   const c = $('#cap'); if (c) c.style.display = 'none'; drawTrip(false);
 }
 async function play(t, speed, record) {
@@ -630,7 +774,7 @@ async function play(t, speed, record) {
         const blob = new Blob(chunks, { type: mime.split(';')[0] }); if (!blob.size) return;
         const id = uid(); await idbPut('blobs', blob, 'video:' + id);
         await saveDoc('video', { trip: t.id, created: new Date().toISOString(), mime: mime.split(';')[0], ext: mime.includes('mp4') ? 'mp4' : 'webm', pending: true }, id);
-        toast('Videon är sparad i resan'); if (S.view === 'karta') render();
+        toast('Videon är sparad i resan'); if (S.view === 'resa') render();
       };
       P.rec.start(500);
     } catch (e) { toast(e.message || 'Inspelning stöds inte här'); P.rec = null; }
@@ -675,47 +819,6 @@ async function showVideo(id) {
   openDlg(`<video src="${u}" controls playsinline autoplay></video><a class="btn x" style="left:10px;right:auto;position:absolute;top:calc(10px + var(--safe-t))" href="${u}" download="resa.${d.data.ext || 'webm'}">Spara</a><button class="x" data-close>Stäng</button>`, 'media');
 }
 function showPhoto(id) { openDlg(`<img data-photo="${id}" data-size="full" alt=""><button class="x" data-close>Stäng</button>`, 'media'); hydrate($('#box')); }
-
-/* ---------------- etapper ---------------- */
-function viewEtapper(main, t) {
-  if (!t) { main.innerHTML = noTrip(); return; }
-  const st = stopsOf(t.id);
-  const L = legs(t), byStop = new Map(L.map(l => [l.b.id, l]));
-  const home = homeOf(), lastSt = st[st.length - 1];
-  const homeBtn = home && lastSt && !(hasPos(lastSt) && hav(pos(lastSt), [home.lon, home.lat]) < 5);
-  let html = `<div class="pad"><div class="spread"><p class="small mute" style="margin:0">${st.length} platser · ${L.length} etapper</p><div class="row"><button class="sm" id="chk">Checka in här</button>${homeBtn ? '<button class="sm" id="addhome">+ Hemresa</button>' : ''}<button class="sm" id="addfl">+ Flyg</button><button class="pri sm" id="add">+ Ny plats</button></div></div>`;
-  if (!st.length) html += `<div class="empty">Börja med platsen ni reste från, till exempel hemorten.</div>`;
-  else html += `<p class="small mute" style="margin:6px 0 0">Håll i ≡ och dra för att flytta en plats.</p>`;
-  html += '<div id="slist">';
-  let lastDay = null;
-  st.forEach((s, i) => {
-    const day = s.data.date || '';
-    if (day !== lastDay) { html += `<div class="day">${day ? esc(fmtD(day)) : 'Utan datum'}</div>`; lastDay = day; }
-    const l = byStop.get(s.id), m = MODES[s.data.mode] || MODES.bil;
-    const via = (s.data.via || []).map(v => v.name).join(', ');
-    html += `<div class="leg srow" data-s="${s.id}"><span class="grip" aria-label="Dra för att flytta" role="button" tabindex="-1">≡</span><div class="bar" style="background:${i ? m.c : '#13242e'}"></div>
-      <div class="open"><div class="t">${i ? `${esc(st[i - 1].data.name)} → ` : ''}${esc(s.data.name)} ${flag(s.data.cc)}</div>
-      <div class="s">${i ? esc(m.n) : 'Start'}${l ? ' · ' + nf(l.km) + ' km' : ''}${via ? ` · <span class="via">mellanlandning ${esc(via)}</span>` : ''}${!hasPos(s) ? (s.data.geo_fail === (s.data.name || '').trim() ? ' · <b>hittades inte – tryck och sök</b>' : ' · <b>saknar position</b> – söks upp när du har nät') : ''}${s.data.geoGuess ? ' · <span class="via">plats hittad automatiskt – tryck och kontrollera</span>' : ''}${i && s.data.straight ? ' · rak linje' : ''}${i && (s.data.pass || []).length ? ` · via ${esc(s.data.pass.map(v => v.name).join(', '))}` : ''}${l && l.detour ? ' · <span class="via">vägen blev en stor omväg – rak linje visas</span>' : ''}</div></div>
-      <div class="open">${whoBadge(s.data.travelers)}</div></div>`;
-  });
-  main.innerHTML = html + '</div></div>';
-  $('#add').onclick = () => stopDlg(t, null);
-  $('#addfl').onclick = () => flightDlg(t);
-  $('#chk').onclick = () => checkIn(t);
-  if ($('#addhome')) $('#addhome').onclick = () => stopDlg(t, null, home);
-  main.querySelectorAll('.srow .open').forEach(b => b.onclick = () => stopDlg(t, S.docs.get(b.closest('.srow').dataset.s)));
-  if (window.Sortable && st.length > 1) {
-    Sortable.create($('#slist'), {
-      handle: '.grip', draggable: '.srow', animation: 150, ghostClass: 'drag-ghost', forceFallback: true, fallbackTolerance: 3,
-      onEnd: async () => {
-        const ids = [...document.querySelectorAll('#slist .srow')].map(e => e.dataset.s);
-        let changed = false;
-        for (const [i, id] of ids.entries()) { const d = S.docs.get(id); if (d && d.data.seq !== i + 1) { await saveDoc('stop', { seq: i + 1 }, id); changed = true; } }
-        if (changed) { toast('Ordningen är sparad'); render(); }
-      }
-    });
-  }
-}
 
 /* ---------------- checka in ---------------- */
 function checkIn(t) {
@@ -805,7 +908,9 @@ function stopDlg(t, s, preset) {
   if (preset && !s) Object.assign(D, { name: preset.name, sub: preset.sub || '', lat: preset.lat, lon: preset.lon, cc: preset.cc }, preset.date ? { date: preset.date } : {}, preset.needsName ? { needsName: true } : {});
   if (!D.via) D.via = []; if (!D.pass) D.pass = []; if (!D.travelers) D.travelers = [];
   const home = homeOf();
-  const b = openDlg(`<h2>${s ? 'Ändra plats' : isFirst ? 'Startplats' : 'Ny plats'}</h2>
+  const leg = s && legs(t).find(l => l.b.id === s.id);
+  const note = !s ? '' : !hasPos(s) ? (s.data.geo_fail === (s.data.name || '').trim() ? 'Platsen hittades inte automatiskt. Sök fram den nedan och välj i listan.' : 'Platsen saknar position. Den söks upp automatiskt när du har nät, eller så söker du fram den nu.') : s.data.geoGuess ? `Platsen hittades automatiskt${s.data.sub ? ' (' + s.data.sub + ')' : ''}. Stämmer den? Tryck Spara. Annars sök rätt plats och välj i listan.` : leg && leg.detour ? 'Vägen hit blev en stor omväg, så en rak linje visas. Välj Rak linje, eller lägg till en ort under Passera via.' : '';
+  const b = openDlg(`<h2>${s ? 'Ändra plats' : isFirst ? 'Startplats' : 'Ny plats'}</h2>${note ? `<div class="warn" style="margin-top:10px">⚠ ${esc(note)}</div>` : ''}
     <label>Plats</label><div id="sb"></div>${home ? `<button type="button" class="sm" id="usehome" style="margin-top:6px">Hem: ${esc(home.name)}</button>` : ''}<div id="picked" class="note"${D.lat != null ? '' : ' hidden'}></div>
     ${isFirst ? '' : `<label>Färdmedel hit</label><div class="chips" id="modes">${Object.entries(MODES).map(([k, m]) => `<button type="button" class="chip" data-m="${k}">${m.n}</button>`).join('')}</div>
     <div id="viabox" hidden><label>Mellanlandningar</label><div id="vias"></div><div id="vsb" style="margin-top:6px"></div><p class="small mute" style="margin:4px 0 0">Räknas inte som besökt land.</p></div>
@@ -813,12 +918,12 @@ function stopDlg(t, s, preset) {
     <div id="passwrap"><div id="passes" style="margin-top:6px"></div><div id="psb" style="margin-top:6px"></div><p class="small mute" style="margin:4px 0 0">Blir vägen fel? Lägg till en ort som vägen ska gå förbi. Räknas inte som besökt plats.</p></div></div>`}
     <div class="whowrap"><label>Vem reste?</label><div class="chips" id="who"></div></div>
     <label for="sd">Datum</label><input id="sd" type="date" value="${esc(D.date || '')}">
-    <div class="row end" style="margin-top:16px">${s ? '<button type="button" id="up" class="sm">↑</button><button type="button" id="dn" class="sm">↓</button><button type="button" id="del">Ta bort</button>' : ''}<button type="button" data-close>Avbryt</button><button class="pri" id="ok">Spara</button></div>`);
+    <div class="row end" style="margin-top:16px">${s ? '<button type="button" id="del" style="margin-right:auto">Ta bort</button>' : ''}<button type="button" data-close>Avbryt</button><button class="pri" id="ok">Spara</button></div>`);
   const showPicked = () => { const p = $('#picked'); p.hidden = D.lat == null; p.innerHTML = D.lat != null ? `${flag(D.cc)} <b>${esc(D.name)}</b> ${D.sub ? '· ' + esc(D.sub) : ''}` : ''; };
   const inp = searchBox($('#sb'), p => { Object.assign(D, { name: p.name, sub: p.sub, lat: p.lat, lon: p.lon, cc: p.cc }); showPicked(); });
   inp.value = D.name || ''; showPicked();
   if ($('#usehome')) $('#usehome').onclick = () => { Object.assign(D, { name: home.name, sub: home.sub || '', lat: home.lat, lon: home.lon, cc: home.cc }); inp.value = home.name; showPicked(); };
-  const renderModes = () => { if (!$('#modes')) return; $('#modes').querySelectorAll('[data-m]').forEach(x => { const on = x.dataset.m === D.mode; x.classList.toggle('on', on); x.style.background = on ? MODES[x.dataset.m].c : ''; x.style.borderColor = on ? MODES[x.dataset.m].c : ''; }); $('#viabox').hidden = D.mode !== 'flyg'; const ground = ['car', 'bike', 'foot', 'rail'].includes((MODES[D.mode] || MODES.bil).r); $('#routebox').hidden = !ground; $('#rmode').querySelectorAll('[data-r]').forEach(x => { const on = (x.dataset.r === 'straight') === !!D.straight; x.classList.toggle('on', on); x.style.background = x.style.borderColor = on ? '#13242e' : ''; }); $('#passwrap').hidden = !!D.straight; };
+  const renderModes = () => { if (!$('#modes')) return; $('#modes').querySelectorAll('[data-m]').forEach(x => { const on = x.dataset.m === D.mode; x.classList.toggle('on', on); x.style.background = on ? MODES[x.dataset.m].c : ''; x.style.borderColor = on ? MODES[x.dataset.m].c : ''; }); $('#viabox').hidden = D.mode !== 'flyg'; const ground = ['car', 'bike', 'foot', 'rail'].includes((MODES[D.mode] || MODES.bil).r); $('#routebox').hidden = !ground; $('#rmode').querySelectorAll('[data-r]').forEach(x => { const on = (x.dataset.r === 'straight') === !!D.straight; x.classList.toggle('on', on); x.style.background = x.style.borderColor = on ? 'var(--sel)' : ''; }); $('#passwrap').hidden = !!D.straight; };
   const renderPass = () => { if (!$('#passes')) return; $('#passes').innerHTML = D.pass.map((v, i) => `<div class="spread" style="padding:4px 0"><span>via ${flag(v.cc)} ${esc(v.name)}</span><button type="button" class="sm" data-rp="${i}" aria-label="Ta bort">✕</button></div>`).join(''); };
   const renderVias = () => { if (!$('#vias')) return; $('#vias').innerHTML = D.via.map((v, i) => `<div class="spread" style="padding:4px 0"><span>${flag(v.cc)} ${esc(v.name)}</span><button type="button" class="sm" data-rv="${i}" aria-label="Ta bort">✕</button></div>`).join(''); };
   if ($('#modes')) {
@@ -843,9 +948,7 @@ function stopDlg(t, s, preset) {
     await saveDoc('stop', D, s && s.id); closeDlg(); render();
   };
   if (s) {
-    const move = async dir => { const i = st.findIndex(x => x.id === s.id), j = i + dir; if (j < 0 || j >= st.length) return; const a = st[i].data.seq, bq = st[j].data.seq; await saveDoc('stop', { seq: bq }, st[i].id); await saveDoc('stop', { seq: a === bq ? a + dir : a }, st[j].id); closeDlg(); render(); };
-    $('#up').onclick = () => move(-1); $('#dn').onclick = () => move(1);
-    $('#del').onclick = () => confirmDlg('Ta bort platsen?', `${s.data.name} tas bort från resan.`, 'Ta bort', async () => { await deleteDoc(s.id); render(); });
+    $('#del').onclick = () => { closeDlg(); removeWithUndo(s.id, [], `${s.data.name} är borttagen`); };
   }
 }
 
@@ -857,7 +960,7 @@ function viewDagbok(main, t) {
   main.innerHTML = `<div class="pad"><div class="spread"><span>${t.data.album ? `<a href="${esc(t.data.album)}" target="_blank" rel="noopener" style="font-weight:600;color:var(--ink)">Hela fotoalbumet ↗</a>` : ''}</span><button class="pri sm" id="add">+ Inlägg</button></div>
     ${es.length ? '' : '<div class="empty">Inga inlägg ännu. Skriv om dagen, en upplevelse eller lägg till bilder.</div>'}
     ${es.map(e => `<article class="card" id="e-${e.id}" style="margin-top:12px">
-      <div class="spread small mute"><span>${esc(fmtD(e.data.date))}${sName(e.data.stop) ? ' · ' + esc(sName(e.data.stop)) : ''} · ${esc(e.data.kind || 'Dagbok')}</span>${e.data.author ? `<span class="who" style="color:${memberColor(e.data.author)}">${esc(memberName(e.data.author))}</span>` : ''}</div>
+      <div class="spread small mute"><span>${esc(fmtD(e.data.date))}${sName(e.data.stop) ? ' · ' + esc(sName(e.data.stop)) : ''} · ${esc(e.data.kind || 'Dagbok')}</span>${e.data.author ? personDots([toPid(e.data.author) || e.data.author]) : ''}</div>
       <h3 style="margin-top:6px">${esc(e.data.title || 'Utan rubrik')}</h3>
       ${e.data.rating ? `<div class="stars" aria-label="${e.data.rating} av 5">${'★'.repeat(e.data.rating)}${'☆'.repeat(5 - e.data.rating)}</div>` : ''}
       ${e.data.text ? `<p style="margin:6px 0 0;white-space:pre-wrap">${esc(e.data.text)}</p>` : ''}
@@ -912,7 +1015,7 @@ function entryDlg(t, e) {
     for (const p of newPhotos) if (D.photos.includes(p.id)) await saveDoc('photo', { ...p.data, entry: ed.id }, p.id);
     closeDlg(); render();
   };
-  if (e) $('#del').onclick = () => confirmDlg('Ta bort inlägget?', 'Inlägget och dess bilder tas bort.', 'Ta bort', async () => { for (const p of e.data.photos || []) await deleteDoc(p); await deleteDoc(e.id); render(); });
+  if (e) $('#del').onclick = () => { closeDlg(); removeWithUndo(e.id, e.data.photos || [], 'Inlägget är borttaget'); };
 }
 
 /* ---------------- statistik ---------------- */
@@ -987,7 +1090,6 @@ function viewVarlden(main) {
   const who = cc => cat(cc) === 'S' || (cat(cc) || '').startsWith('X:') ? ` <span class="small mute">(${sel.filter(id => C.get(cc).has(id)).map(personName).map(esc).join(', ')})</span>` : '';
   main.innerHTML = `<div class="pad">${personFilter()}
     <div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(104px,1fr))">${kp.map(k => `<div class="kpi" style="background:${k.col}"><b>${k.n}</b><span>${esc(k.label)}</span></div>`).join('')}</div>
-    <a href="#pass" class="btn" style="width:100%;margin-top:10px">Pass och utmärkelser</a>
     <div id="wmapbox" style="margin-top:12px"><div id="wmap"></div></div><p class="small mute" style="margin:6px 0 0">Punkterna är platserna ${sel.length === 1 ? esc(personName(sel[0])) + ' varit på' : 'ni varit på'}, i samma färger som länderna. Tryck på en punkt för namn och resa.</p>
     <div style="margin-top:12px">${cats.map(k => { const l = byCat(k); return l.length ? `<div class="cl"><i style="background:${k === 'X' ? stripeCss(sel) : catColor(k)};${k === 'M' ? 'border:2px dashed #6b7a80' : ''}"></i><span><b>${esc(catLabel(k, sel))} (${l.length}):</b> ${l.map(cc => `${flag(cc)} ${esc(cName(cc))}${who(cc)}`).join(', ')}</span></div>` : ''; }).join('') || '<div class="empty">Lägg till platser i en resa så färgas länderna här.</div>'}</div></div>`;
   bindPersonFilter(main);
@@ -1109,7 +1211,6 @@ function viewTopp(main) {
     : `<section class="card"><h3>Topplista</h3><div class="ranks">${metrics.map(([k, l]) => `<div><div class="small" style="font-weight:800;margin-bottom:2px">${l}</div>${[...stats].sort((a, b) => b[k] - a[k]).map((x, i) => `<div class="spread" style="padding:2px 0;font-size:14px"><span>${i + 1}. <span class="dot" style="background:${personColor(x.id)}"></span>${esc(personName(x.id))}</span><span class="num">${k === 'km' ? nf(x[k]) : x[k]}</span></div>`).join('')}</div>`).join('')}</div></section>`;
   main.innerHTML = `<div class="pad">${personFilter()}
     <div class="seg" id="yrs" style="margin-bottom:12px"><button data-y="" class="${yr ? '' : 'on'}">Alla år</button>${years.slice(0, 4).map(y => `<button data-y="${y}" class="${yr === y ? 'on' : ''}">${y}</button>`).join('')}</div>
-    <a href="#pass" class="btn" style="width:100%;margin-bottom:12px">Pass och utmärkelser</a>
     ${statCard}
     <section class="card bars"><h3>Kilometer per färdmedel</h3>${Object.entries(perMode).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="r"><span>${MODES[k] ? MODES[k].n : k}</span><i style="width:${Math.max(2, v / maxMode * 100)}%;background:${(MODES[k] || MODES.bil).c}"></i><span class="num">${nf(v)} km</span></div>`).join('') || '<p class="mute small">Inga etapper ännu.</p>'}</section>
     <section class="card"><h3>Längsta etapperna</h3>${longest.map((l, i) => `<div class="spread" style="padding:5px 0;font-size:14px"><span><b>${i + 1}.</b> ${esc(l.a.data.name)} → ${esc(l.b.data.name)} <span class="small mute">${esc(l.m.n)}${l.via.length ? ' via ' + esc(l.via.map(v => v.name).join(', ')) : ''}</span></span><span class="num">${nf(l.km)} km</span></div>`).join('') || '<p class="mute small">Inga etapper ännu.</p>'}</section>
@@ -1131,8 +1232,11 @@ function viewMer(main) {
       <div class="row"><button class="pri" id="share">Dela inbjudan</button><span class="small">Kod: <b style="letter-spacing:2px">${esc(S.joinCode || '…')}</b></span>${admin ? '<button class="sm" id="newcode">Ny kod</button>' : ''}</div>
       ${!hasRoles ? '<p class="small" style="color:#8a4a00;margin:8px 0 0">Kör uppdateringen schema_v2.sql i Supabase för att kunna ta bort medlemmar och byta kod.</p>' : ''}</section>
     <section class="card"><h3>Hem</h3><p class="small mute" style="margin:4px 0 8px">Används som startplats för nya resor och för knappen Hemresa.</p>${homeOf() ? `<div class="note" style="margin:0 0 8px">${flag(homeOf().cc)} <b>${esc(homeOf().name)}</b></div>` : ''}<div id="homesb"></div></section>
-    <section class="card"><h3>Synk</h3><p class="small" style="margin:6px 0">${pendingCount()} ändringar väntar · ${S.lastSync ? 'senast ' + S.lastSync.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' }) : 'inte synkad ännu'}${S.syncErr ? `<br><span style="color:#b00020">${esc(S.syncErr)}</span>` : ''}</p><button id="syncnow">Synka nu</button></section>
+    <section class="card"><h3>Synk</h3><p class="small" style="margin:6px 0">${pendingCount()} ${pendingCount() === 1 ? 'ändring väntar' : 'ändringar väntar'} · ${S.lastSync ? 'senast ' + S.lastSync.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' }) : 'inte synkad ännu'}${S.syncErr ? `<br><span style="color:#b00020">${esc(S.syncErr)}</span>` : ''}</p><button id="syncnow">Synka nu</button></section>
     <section class="card"><h3>Säkerhetskopia</h3><p class="small mute" style="margin:6px 0">All text och alla platser som en fil. Bilderna ligger kvar i molnet.</p><button id="exp">Ladda ner kopia</button></section>
+    <section class="card"><h3>Utseende</h3><div class="seg" id="theme" style="margin-top:8px">${[['auto', 'Som telefonen'], ['light', 'Ljust'], ['dark', 'Mörkt']].map(([k, n]) => `<button data-th="${k}" class="${getTheme() === k ? 'on' : ''}">${n}</button>`).join('')}</div></section>
+    ${conflictSection()}
+    ${trashSection()}
     <button id="lo" style="width:100%">Logga ut</button>
     <p class="small mute" style="margin-top:16px">Karta © OpenFreeMap, OpenMapTiles, OpenStreetMap-bidragsgivare. Sökning: Photon. Rutter: FOSSGIS OSRM och BRouter. Flyg: adsbdb.</p></div>`;
   main.querySelectorAll('.prow').forEach(b => b.onclick = () => personDlg(S.docs.get(b.dataset.p)));
@@ -1149,8 +1253,53 @@ function viewMer(main) {
   });
   searchBox($('#homesb'), async p => { await saveDoc('home', { name: p.name, sub: p.sub, lat: p.lat, lon: p.lon, cc: p.cc }, S.user.id); toast('Hem är sparat'); render(); }, homeOf() ? 'Byt hem – sök ort eller adress' : 'Sök din hemort eller adress');
   $('#syncnow').onclick = async () => { await sync(); render(); };
-  $('#exp').onclick = () => { const data = JSON.stringify({ exported: new Date().toISOString(), docs: [...S.docs.values()].filter(live).map(d => ({ id: d.id, kind: d.kind, data: d.data })) }, null, 1); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([data], { type: 'application/json' })); a.download = `resdagboken-${today()}.json`; a.click(); };
-  $('#lo').onclick = () => confirmDlg('Logga ut?', 'Ändringar som inte är synkade försvinner från den här telefonen.', 'Logga ut', logout);
+  $('#exp').onclick = exportAll;
+  $('#lo').onclick = safeLogout;
+  $('#theme').onclick = e => { const b = e.target.closest('[data-th]'); if (b) { setTheme(b.dataset.th); render(); } };
+  main.querySelectorAll('[data-cf]').forEach(b => b.onclick = () => conflictDlg(S.docs.get(b.dataset.cf)));
+  main.querySelectorAll('[data-rb]').forEach(b => b.onclick = () => restoreBatch(b.dataset.rb));
+}
+function getTheme() { try { return localStorage.getItem('rdTheme') || 'auto'; } catch (e) { return 'auto'; } }
+function setTheme(v) { try { localStorage.setItem('rdTheme', v); } catch (e) {} applyTheme(); }
+function applyTheme() {
+  const v = getTheme(); if (v === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.dataset.theme = v;
+  const dark = v === 'dark' || (v === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+  const m = document.querySelector('meta[name=theme-color]'); if (m) m.content = dark ? '#0f1a20' : '#fbfbf2';
+}
+applyTheme(); try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme); } catch (e) {}
+const conflicts = () => ofKind('conflict').sort((a, b) => (b.data.at || '').localeCompare(a.data.at || ''));
+function conflictSection() {
+  const cs = conflicts(); if (!cs.length) return '';
+  return `<section class="card"><h3>Ändrat på två ställen</h3><p class="small mute" style="margin:4px 0 6px">Samma sak ändrades samtidigt på två telefoner. Ingenting har försvunnit – välj vilken version som ska gälla.</p>${cs.map(c => `<button class="prow" data-cf="${c.id}"><span style="flex:1;text-align:left">${esc(c.data.label || 'Ändring')}</span><span class="small mute">${esc(new Date(c.data.at).toLocaleDateString('sv-SE', { day: 'numeric', month: 'short' }))}</span></button>`).join('')}</section>`;
+}
+const FIELD = { title: 'Namn', name: 'Plats', date: 'Datum', mode: 'Färdmedel', travelers: 'Vem reste', text: 'Text', rating: 'Betyg', kind: 'Typ', album: 'Fotoalbum', color: 'Färg', seq: 'Ordning', photos: 'Bilder', via: 'Mellanlandningar', pass: 'Passera via' };
+function showVal(k, v) {
+  if (v == null || v === '') return '–';
+  if (k === 'travelers' && Array.isArray(v)) return travelersOf(v).map(personName).join(', ');
+  if (k === 'mode') return (MODES[v] || {}).n || v;
+  if (k === 'photos' && Array.isArray(v)) return v.length + ' st';
+  if ((k === 'via' || k === 'pass') && Array.isArray(v)) return v.map(x => x.name).join(', ') || '–';
+  if (typeof v === 'object') return JSON.stringify(v).slice(0, 80);
+  return String(v);
+}
+function conflictDlg(c) {
+  if (!c) return;
+  const cur = S.docs.get(c.data.of), mine = cur ? cur.data : c.data.mine, other = c.data.other || {};
+  const keys = [...new Set([...Object.keys(mine || {}), ...Object.keys(other)])].filter(k => FIELD[k] && JSON.stringify((mine || {})[k]) !== JSON.stringify(other[k]));
+  openDlg(`<h2>${esc(c.data.label || 'Ändring')}</h2><p class="small mute">Den här versionen gäller nu. Den andra sparades när ni ändrade samtidigt.</p>
+    ${c.data.other_deleted ? '<div class="warn">Den andra telefonen tog bort den här.</div>' : ''}
+    <div class="cfg"><b></b><b>Gäller nu</b><b>Den andra</b>${keys.map(k => `<span>${FIELD[k]}</span><span>${esc(showVal(k, (mine || {})[k]))}</span><span>${esc(showVal(k, other[k]))}</span>`).join('') || '<span></span><span class="small mute" style="grid-column:span 2">Bara tekniska skillnader.</span>'}</div>
+    <div class="row end" style="margin-top:16px"><button id="cuse">Använd den andra</button><button class="pri" id="ckeep">Behåll den som gäller</button></div>`);
+  $('#ckeep').onclick = async () => { await deleteDoc(c.id); closeDlg(); render(); toast('Klart'); };
+  $('#cuse').onclick = async () => {
+    if (cur) { cur.data = { ...other }; cur.deleted = !!c.data.other_deleted; cur.dirty = 1; await idbPut('docs', cur); }
+    await deleteDoc(c.id); scheduleSync(); closeDlg(); render(); toast('Den andra versionen gäller nu');
+  };
+}
+function trashSection() {
+  const ts = [...S.docs.values()].filter(d => d.deleted && d.data && d.data.del_top && d.kind !== 'conflict').sort((a, b) => (b.data.del_at || '').localeCompare(a.data.del_at || '')).slice(0, 30);
+  if (!ts.length) return '';
+  return `<section class="card"><h3>Borttaget</h3><p class="small mute" style="margin:4px 0 6px">Det du tagit bort kan återställas här.</p>${ts.map(d => `<div class="spread" style="padding:6px 0;border-bottom:1px solid var(--line2)"><span>${esc(docLabel(d))} <span class="small mute">${esc(new Date(d.data.del_at).toLocaleDateString('sv-SE', { day: 'numeric', month: 'short' }))}</span></span><button class="sm" data-rb="${d.data.del_batch}">Återställ</button></div>`).join('')}</section>`;
 }
 function personDlg(p) {
   const used = persons().map(x => x.data.color);
@@ -1173,7 +1322,7 @@ function personDlg(p) {
     if (p && p.data.user_id === S.user.id) { sb.from('members').update({ name }).eq('group_id', S.group).eq('user_id', S.user.id).then(() => loadMembers()); }
     closeDlg(); render();
   };
-  if ($('#pdel')) $('#pdel').onclick = () => confirmDlg(`Ta bort ${p.data.name}?`, 'Personen försvinner från listor och statistik. Resorna finns kvar.', 'Ta bort', async () => { await deleteDoc(p.id); render(); });
+  if ($('#pdel')) $('#pdel').onclick = () => { closeDlg(); removeWithUndo(p.id, [], `${p.data.name} är borttagen`); };
   if ($('#prm')) $('#prm').onclick = () => confirmDlg(`Ta bort ${p.data.name} från dagboken?`, 'Kontot förlorar åtkomst. Personen finns kvar i resorna som person utan konto.', 'Ta bort', async () => {
     const { error } = await sb.rpc('remove_member', { p_group: S.group, p_user: p.data.user_id }); if (error) return toast(navigator.onLine ? error.message : 'Kräver nät');
     await saveDoc('person', { user_id: null }, p.id); await loadMembers(); render();
