@@ -218,7 +218,15 @@ async function fetchRoute(a, b) {
   }
   return null;
 }
+async function nameCheckins() {
+  for (const st of ofKind('stop').filter(x => x.data.needsName && hasPos(x))) {
+    const r = await reverseCountry(st.data.lat, st.data.lon); if (!r) continue;
+    await saveDoc('stop', { ...(r.name && /^Plats /.test(st.data.name || '') ? { name: r.name } : {}), cc: r.cc || st.data.cc, needsName: false }, st.id);
+    await sleep(1100);
+  }
+}
 async function routePending() {
+  await nameCheckins();
   for (const t of trips()) {
     const st = stopsOf(t.id).filter(hasPos);
     for (let i = 1; i < st.length; i++) {
@@ -256,7 +264,7 @@ async function searchPlaces(q) {
   });
 }
 async function reverseCountry(lat, lon) {
-  try { const r = await fetch(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lon}&limit=1&lang=en`); const j = await r.json(); const p = j.features && j.features[0] && j.features[0].properties; return p ? { cc: (p.countrycode || '').toUpperCase(), name: p.name || p.city || '' } : null; } catch (e) { return null; }
+  try { const r = await fetch(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lon}&limit=1&lang=en`); const j = await r.json(); const p = j.features && j.features[0] && j.features[0].properties; return p ? { cc: (p.countrycode || '').toUpperCase(), name: p.city || p.locality || p.district || p.name || p.county || '' } : null; } catch (e) { return null; }
 }
 function searchBox(el, onPick, placeholder) {
   el.innerHTML = `<input type="search" placeholder="${esc(placeholder || 'Sök ort, adress eller flygplats')}" autocomplete="off" enterkeyhint="search"><div class="results" hidden></div>`;
@@ -452,14 +460,14 @@ function startApp() {
 window.addEventListener('hashchange', () => { if (shellBuilt) render(); });
 function render() {
   if (!shellBuilt) return;
-  const v = (location.hash.slice(1) || 'karta'); S.view = VIEWS.some(x => x[0] === v) ? v : 'karta';
+  const v = (location.hash.slice(1) || 'karta'); S.view = VIEWS.some(x => x[0] === v) || v === 'pass' ? v : 'karta';
   document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('on', a.dataset.v === S.view));
   const t = curTrip(); if (t) S.trip = t.id;
   const tripView = ['karta', 'etapper', 'dagbok'].includes(S.view);
   $('#top').innerHTML = tripView
     ? `<select id="tsel" aria-label="Välj resa">${trips().map(x => `<option value="${x.id}" ${t && x.id === t.id ? 'selected' : ''}>${esc(x.data.title)}</option>`).join('') || '<option>Ingen resa ännu</option>'}</select>
        ${t ? '<button class="sm" id="tedit" aria-label="Ändra resa">Ändra</button>' : ''}<button class="sm pri" id="tnew">+ Resa</button><span id="sync"></span>`
-    : `<h2 style="flex:1">${VIEWS.find(x => x[0] === S.view)[1]}</h2><span id="sync"></span>`;
+    : `${S.view === 'pass' ? '<a href="#varlden" class="btn sm" aria-label="Tillbaka">←</a>' : ''}<h2 style="flex:1">${S.view === 'pass' ? 'Pass och utmärkelser' : VIEWS.find(x => x[0] === S.view)[1]}</h2><span id="sync"></span>`;
   updateSyncLabel();
   if ($('#tsel')) $('#tsel').onchange = e => { S.trip = e.target.value; idbPut('kv', S.trip, 'trip'); stopPlay(); render(); };
   if ($('#tnew')) $('#tnew').onclick = () => tripDlg();
@@ -467,7 +475,7 @@ function render() {
   const main = $('#main');
   if (S.view !== 'karta') detachMap();
   if (S.view !== 'varlden' && wmap) { try { wmap.remove(); } catch (e) {} wmap = null; wReady = false; }
-  ({ karta: viewKarta, etapper: viewEtapper, dagbok: viewDagbok, varlden: viewVarlden, topp: viewTopp, mer: viewMer })[S.view](main, t);
+  ({ karta: viewKarta, etapper: viewEtapper, dagbok: viewDagbok, varlden: viewVarlden, topp: viewTopp, mer: viewMer, pass: viewPass })[S.view](main, t);
   hydrate(main);
 }
 const noTrip = () => `<div class="pad"><div class="empty"><p>Ingen resa ännu.</p><button class="pri" onclick="document.getElementById('tnew').click()">Skapa din första resa</button></div></div>`;
@@ -550,6 +558,7 @@ function viewKarta(main, t) {
   if (!t) { main.innerHTML = noTrip(); return; }
   const L = legs(t), vids = videosOf(t.id);
   main.innerHTML = `<div id="mapslot"></div><div class="pad">
+    <button id="chk" style="width:100%;margin-bottom:8px">Checka in här</button>
     <div class="row"><button class="pri" id="play" style="flex:1">Spela upp resan</button><button id="rec" style="flex:1">Spara som video</button></div>
     <div class="row" style="margin-top:8px"><span class="small mute">Fart</span><div class="seg" id="speed" style="flex:1"><button data-s="0.6">Lugn</button><button data-s="1" class="on">Normal</button><button data-s="2">Snabb</button></div></div>
     <div class="legend">${Object.values(MODES).map(m => `<span><svg width="24" height="8" aria-hidden="true"><line x1="2" y1="4" x2="22" y2="4" stroke="${m.c}" stroke-width="${m.w}" stroke-linecap="round" ${m.d === 'dash' ? 'stroke-dasharray="7 4"' : m.d === 'dot' ? 'stroke-dasharray="0.1 7"' : ''}/></svg>${m.n}</span>`).join('')}</div>
@@ -564,6 +573,7 @@ function viewKarta(main, t) {
   let speed = 1;
   $('#speed').onclick = e => { const b = e.target.closest('[data-s]'); if (!b) return; speed = +b.dataset.s; $('#speed').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); if (playing) playing.speed = speed; };
   $('#play').onclick = () => playing ? stopPlay() : play(t, speed, false);
+  $('#chk').onclick = () => checkIn(t);
   $('#rec').onclick = () => playing ? stopPlay() : play(t, speed, true);
   main.querySelectorAll('[data-vid]').forEach(b => b.onclick = () => showVideo(b.dataset.vid));
 }
@@ -647,7 +657,7 @@ function viewEtapper(main, t) {
   const L = legs(t), byStop = new Map(L.map(l => [l.b.id, l]));
   const home = homeOf(), lastSt = st[st.length - 1];
   const homeBtn = home && lastSt && !(hasPos(lastSt) && hav(pos(lastSt), [home.lon, home.lat]) < 5);
-  let html = `<div class="pad"><div class="spread"><p class="small mute" style="margin:0">${st.length} platser · ${L.length} etapper</p><div class="row">${homeBtn ? '<button class="sm" id="addhome">+ Hemresa</button>' : ''}<button class="sm" id="addfl">+ Flyg</button><button class="pri sm" id="add">+ Ny plats</button></div></div>`;
+  let html = `<div class="pad"><div class="spread"><p class="small mute" style="margin:0">${st.length} platser · ${L.length} etapper</p><div class="row"><button class="sm" id="chk">Checka in här</button>${homeBtn ? '<button class="sm" id="addhome">+ Hemresa</button>' : ''}<button class="sm" id="addfl">+ Flyg</button><button class="pri sm" id="add">+ Ny plats</button></div></div>`;
   if (!st.length) html += `<div class="empty">Börja med platsen ni reste från, till exempel hemorten.</div>`;
   else html += `<p class="small mute" style="margin:6px 0 0">Håll i ≡ och dra för att flytta en plats.</p>`;
   html += '<div id="slist">';
@@ -665,6 +675,7 @@ function viewEtapper(main, t) {
   main.innerHTML = html + '</div></div>';
   $('#add').onclick = () => stopDlg(t, null);
   $('#addfl').onclick = () => flightDlg(t);
+  $('#chk').onclick = () => checkIn(t);
   if ($('#addhome')) $('#addhome').onclick = () => stopDlg(t, null, home);
   main.querySelectorAll('.srow .open').forEach(b => b.onclick = () => stopDlg(t, S.docs.get(b.closest('.srow').dataset.s)));
   if (window.Sortable && st.length > 1) {
@@ -678,6 +689,22 @@ function viewEtapper(main, t) {
       }
     });
   }
+}
+
+/* ---------------- checka in ---------------- */
+function checkIn(t) {
+  if (!t) return toast('Skapa en resa först');
+  if (!navigator.geolocation) return toast('Telefonen kan inte ge position här');
+  toast('Hämtar position…', 10000);
+  navigator.geolocation.getCurrentPosition(async p => {
+    const lat = +p.coords.latitude.toFixed(5), lon = +p.coords.longitude.toFixed(5);
+    const st = stopsOf(t.id), last = st[st.length - 1];
+    if (last && hasPos(last) && hav(pos(last), [lon, lat]) < 0.5) { toast('Du är redan incheckad här'); return; }
+    let name = '', cc = '';
+    if (navigator.onLine) { const r = await reverseCountry(lat, lon); if (r) { name = r.name; cc = r.cc; } }
+    toast('Position hittad', 1200);
+    stopDlg(t, null, { name: name || 'Plats ' + new Date().toLocaleString('sv-SE', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }), sub: name ? '' : 'Namnet hämtas när du har nät', lat, lon, cc, date: today(), needsName: !cc });
+  }, err => toast(err.code === 1 ? 'Appen får inte se din position. Tillåt plats för webbplatsen i telefonens inställningar.' : 'Kunde inte hitta din position, försök igen'), { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
 }
 
 /* ---------------- flyg via flygnummer ---------------- */
@@ -749,7 +776,7 @@ function stopDlg(t, s, preset) {
   const st = stopsOf(t.id), isFirst = s ? st[0] && st[0].id === s.id : !st.length;
   const last = st[st.length - 1];
   const D = s ? JSON.parse(JSON.stringify(s.data)) : { trip: t.id, name: '', date: last ? last.data.date : today(), mode: 'bil', travelers: last ? travelersOf(last.data.travelers) : allIds(), via: [], seq: (last ? (last.data.seq || 0) : 0) + 1 };
-  if (preset && !s) Object.assign(D, { name: preset.name, sub: preset.sub || '', lat: preset.lat, lon: preset.lon, cc: preset.cc });
+  if (preset && !s) Object.assign(D, { name: preset.name, sub: preset.sub || '', lat: preset.lat, lon: preset.lon, cc: preset.cc }, preset.date ? { date: preset.date } : {}, preset.needsName ? { needsName: true } : {});
   if (!D.via) D.via = []; if (!D.travelers) D.travelers = [];
   const home = homeOf();
   const b = openDlg(`<h2>${s ? 'Ändra plats' : isFirst ? 'Startplats' : 'Ny plats'}</h2>
@@ -925,6 +952,7 @@ function viewVarlden(main) {
   const who = cc => cat(cc) === 'S' || (cat(cc) || '').startsWith('X:') ? ` <span class="small mute">(${sel.filter(id => C.get(cc).has(id)).map(personName).map(esc).join(', ')})</span>` : '';
   main.innerHTML = `<div class="pad">${personFilter()}
     <div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(104px,1fr))">${kp.map(k => `<div class="kpi" style="background:${k.col}"><b>${k.n}</b><span>${esc(k.label)}</span></div>`).join('')}</div>
+    <a href="#pass" class="btn" style="width:100%;margin-top:10px">Pass och utmärkelser</a>
     <div id="wmapbox" style="margin-top:12px"><div id="wmap"></div></div><p class="small mute" style="margin:6px 0 0">Punkterna är platserna ${sel.length === 1 ? esc(personName(sel[0])) + ' varit på' : 'ni varit på'}, i samma färger som länderna. Tryck på en punkt för namn och resa.</p>
     <div style="margin-top:12px">${cats.map(k => { const l = byCat(k); return l.length ? `<div class="cl"><i style="background:${k === 'X' ? stripeCss(sel) : catColor(k)};${k === 'M' ? 'border:2px dashed #6b7a80' : ''}"></i><span><b>${esc(catLabel(k, sel))} (${l.length}):</b> ${l.map(cc => `${flag(cc)} ${esc(cName(cc))}${who(cc)}`).join(', ')}</span></div>` : ''; }).join('') || '<div class="empty">Lägg till platser i en resa så färgas länderna här.</div>'}</div></div>`;
   bindPersonFilter(main);
@@ -1046,6 +1074,7 @@ function viewTopp(main) {
     : `<section class="card"><h3>Topplista</h3><div class="ranks">${metrics.map(([k, l]) => `<div><div class="small" style="font-weight:800;margin-bottom:2px">${l}</div>${[...stats].sort((a, b) => b[k] - a[k]).map((x, i) => `<div class="spread" style="padding:2px 0;font-size:14px"><span>${i + 1}. <span class="dot" style="background:${personColor(x.id)}"></span>${esc(personName(x.id))}</span><span class="num">${k === 'km' ? nf(x[k]) : x[k]}</span></div>`).join('')}</div>`).join('')}</div></section>`;
   main.innerHTML = `<div class="pad">${personFilter()}
     <div class="seg" id="yrs" style="margin-bottom:12px"><button data-y="" class="${yr ? '' : 'on'}">Alla år</button>${years.slice(0, 4).map(y => `<button data-y="${y}" class="${yr === y ? 'on' : ''}">${y}</button>`).join('')}</div>
+    <a href="#pass" class="btn" style="width:100%;margin-bottom:12px">Pass och utmärkelser</a>
     ${statCard}
     <section class="card bars"><h3>Kilometer per färdmedel</h3>${Object.entries(perMode).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="r"><span>${MODES[k] ? MODES[k].n : k}</span><i style="width:${Math.max(2, v / maxMode * 100)}%;background:${(MODES[k] || MODES.bil).c}"></i><span class="num">${nf(v)} km</span></div>`).join('') || '<p class="mute small">Inga etapper ännu.</p>'}</section>
     <section class="card"><h3>Längsta etapperna</h3>${longest.map((l, i) => `<div class="spread" style="padding:5px 0;font-size:14px"><span><b>${i + 1}.</b> ${esc(l.a.data.name)} → ${esc(l.b.data.name)} <span class="small mute">${esc(l.m.n)}${l.via.length ? ' via ' + esc(l.via.map(v => v.name).join(', ')) : ''}</span></span><span class="num">${nf(l.km)} km</span></div>`).join('') || '<p class="mute small">Inga etapper ännu.</p>'}</section>
@@ -1118,6 +1147,81 @@ function personDlg(p) {
     const { error } = await sb.rpc('set_member_role', { p_group: S.group, p_user: p.data.user_id, p_role: member.role === 'admin' ? 'member' : 'admin' }); if (error) return toast(navigator.onLine ? error.message : 'Kräver nät');
     await loadMembers(); closeDlg(); render();
   };
+}
+
+/* ---------------- pass och utmärkelser ---------------- */
+const CONT = {};
+('EU:AD AL AT AX BA BE BG BY CH CY CZ DE DK EE ES FI FO FR GB GG GI GR HR HU IE IM IS IT JE LI LT LU LV MC MD ME MK MT NL NO PL PT RO RS RU SE SI SJ SK SM UA VA XK|' +
+ 'AS:AE AF AM AZ BD BH BN BT CN GE HK ID IL IN IQ IR JO JP KG KH KP KR KW KZ LA LB LK MM MN MO MV MY NP OM PH PK PS QA SA SG SY TH TJ TL TM TR TW UZ VN YE|' +
+ 'AF:AO BF BI BJ BW CD CF CG CI CM CV DJ DZ EG EH ER ET GA GH GM GN GQ GW KE KM LR LS LY MA MG ML MR MU MW MZ NA NE NG RE RW SC SD SH SL SN SO SS ST SZ TD TG TN TZ UG YT ZA ZM ZW|' +
+ 'NA:AG AI AW BB BL BM BQ BS BZ CA CR CU CW DM DO GD GL GP GT HN HT JM KN KY LC MF MQ MS MX NI PA PM PR SV SX TC TT US VC VG VI|' +
+ 'SA:AR BO BR CL CO EC FK GF GY PE PY SR UY VE|OC:AS AU CK FJ FM GU KI MH MP NC NF NR NU NZ PF PG PN PW SB TK TO TV VU WF WS')
+  .split('|').forEach(g => { const [k, l] = g.split(':'); l.split(' ').forEach(c => CONT[c] = k); });
+const CONT_NAME = { EU: 'Europa', AS: 'Asien', AF: 'Afrika', NA: 'Nordamerika', SA: 'Sydamerika', OC: 'Oceanien' };
+let passPerson = null;
+function viewPass(main) {
+  const ps = persons();
+  if (!ps.length) { main.innerHTML = '<div class="pad"><div class="empty">Inga personer ännu.</div></div>'; return; }
+  const me = personForUser(S.user.id);
+  const pid = passPerson && personById(passPerson) ? passPerson : (me ? me.id : ps[0].id);
+  const col = personColor(pid);
+  const stops = [], ls = [];
+  for (const t of trips()) {
+    stopsOf(t.id).forEach(s => { if (travelersOf(s.data.travelers).includes(pid)) stops.push({ s, t }); });
+    legs(t).forEach(l => { if (travelersOf(l.tr).includes(pid)) ls.push(l); });
+  }
+  const C = new Map();
+  stops.forEach(({ s, t }) => { if (!s.data.cc) return; const c = C.get(s.data.cc) || { first: '', trips: new Set() }; if (s.data.date && (!c.first || s.data.date < c.first)) c.first = s.data.date; c.trips.add(t.id); C.set(s.data.cc, c); });
+  const conts = new Set([...C.keys()].map(cc => CONT[cc]).filter(Boolean));
+  const located = stops.filter(x => hasPos(x.s));
+  const lats = located.map(x => x.s.data.lat);
+  const km = ls.reduce((a, l) => a + l.km, 0), longest = Math.max(0, ...ls.map(l => l.km));
+  const modes = new Set(ls.map(l => l.mode));
+  const tripIds = new Set(stops.map(x => x.t.id));
+  const days = new Set();
+  trips().forEach(t => { const ds = stopsOf(t.id).filter(s => s.data.date && travelersOf(s.data.travelers).includes(pid)).map(s => s.data.date).sort(); ds.forEach(d => days.add(d)); if (ds.length > 1) for (let d = new Date(ds[0]); d <= new Date(ds[ds.length - 1]); d.setDate(d.getDate() + 1)) days.add(d.toISOString().slice(0, 10)); });
+  const nordic = ['SE', 'NO', 'DK', 'FI', 'IS'];
+  const badges = [
+    ['Första resan', 'Minst en resa', tripIds.size >= 1],
+    ['Gränslös', 'Besökt 5 länder', C.size >= 5],
+    ['Världsvan', 'Besökt 10 länder', C.size >= 10],
+    ['Globetrotter', 'Besökt 25 länder', C.size >= 25],
+    ['Utanför Europa', 'Ett land utanför Europa', [...conts].some(c => c !== 'EU')],
+    ['Hela Norden', 'Sverige, Norge, Danmark, Finland och Island', nordic.every(c => C.has(c))],
+    ['Två kontinenter', 'Besökt två kontinenter', conts.size >= 2],
+    ['Tre kontinenter', 'Besökt tre kontinenter', conts.size >= 3],
+    ['Alla kontinenter', 'Alla sex bebodda kontinenter', conts.size >= 6],
+    ['Ekvatorn', 'Varit både norr och söder om ekvatorn', lats.some(x => x > 0) && lats.some(x => x < 0)],
+    ['Polcirkeln', 'Varit norr om polcirkeln', lats.some(x => x >= 66.56)],
+    ['Långflygare', 'En etapp över 5 000 km', longest >= 5000],
+    ['Alla färdmedel', 'Rest med alla sju färdmedel', Object.keys(MODES).every(m => modes.has(m))],
+    ['Tusen kilometer', 'Rest 1 000 km', km >= 1000],
+    ['Tiotusen kilometer', 'Rest 10 000 km', km >= 10000],
+    ['Jorden runt', 'Rest 40 075 km – ett varv runt jorden', km >= 40075],
+    ['Månadslång', '30 resdagar', days.size >= 30],
+    ['Hundra dagar', '100 resdagar', days.size >= 100]
+  ];
+  const earned = badges.filter(b => b[2]), locked = badges.filter(b => !b[2]);
+  const ext = (f, cmp) => located.reduce((best, x) => !best || cmp(f(x.s), f(best.s)) ? x : best, null);
+  const recs = located.length ? [['Nordligaste', ext(x => x.data.lat, (a, b) => a > b)], ['Sydligaste', ext(x => x.data.lat, (a, b) => a < b)], ['Östligaste', ext(x => x.data.lon, (a, b) => a > b)], ['Västligaste', ext(x => x.data.lon, (a, b) => a < b)]] : [];
+  const stamps = [...C.entries()].sort((a, b) => (a[1].first || '9').localeCompare(b[1].first || '9'));
+  const rot = cc => ((cc.charCodeAt(0) * 7 + cc.charCodeAt(1) * 3) % 15) - 7;
+  const medal = (on, txt) => `<svg width="38" height="38" viewBox="0 0 38 38" aria-hidden="true"><circle cx="19" cy="19" r="16" fill="${on ? col : '#dfe5e7'}"/><circle cx="19" cy="19" r="12" fill="none" stroke="#fff" stroke-width="1.5" stroke-dasharray="2 2"/><text x="19" y="23.5" text-anchor="middle" font-size="12" font-weight="800" fill="${on ? '#fff' : '#9aa8ae'}" font-family="Overpass,sans-serif">${esc(txt)}</text></svg>`;
+  main.innerHTML = `<div class="pad">
+    ${ps.length > 1 ? `<div class="chips" id="pp" style="margin-bottom:12px">${ps.map(p => { const on = p.id === pid; return `<button class="chip${on ? ' on' : ''}" data-p="${p.id}" style="${on ? `background:${p.data.color};border-color:${p.data.color}` : `color:${p.data.color};border-color:${p.data.color}`}">${esc(p.data.name)}</button>`; }).join('')}</div>` : ''}
+    <section class="passhead" style="background:${col}">
+      <div class="small" style="opacity:.85;letter-spacing:.5px">RESPASS</div>
+      <div style="font-size:30px;font-weight:800;line-height:1.1">${esc(personName(pid))}</div>
+      <div class="passnums"><div><b>${C.size}</b><span>länder</span></div><div><b>${conts.size}</b><span>kontinenter</span></div><div><b>${tripIds.size}</b><span>resor</span></div><div><b>${nf(km)}</b><span>km</span></div></div>
+      ${conts.size ? `<div class="small" style="margin-top:6px;opacity:.9">${[...conts].map(c => CONT_NAME[c]).join(' · ')}</div>` : ''}
+    </section>
+    <h3 style="margin:18px 0 8px">Stämplar</h3>
+    ${stamps.length ? `<div class="stamps">${stamps.map(([cc, c]) => `<div class="stamp" style="--c:${col};--r:${rot(cc)}deg"><span class="f">${flag(cc)}</span><span class="n">${esc(cName(cc))}</span><span class="d">${c.first ? esc(new Date(c.first + 'T12:00').toLocaleDateString('sv-SE', { day: 'numeric', month: 'short', year: 'numeric' })) : ''}${c.trips.size > 1 ? ` · ${c.trips.size} resor` : ''}</span></div>`).join('')}</div>` : '<div class="empty">Inga länder ännu.</div>'}
+    <h3 style="margin:18px 0 4px">Utmärkelser <span class="small mute">${earned.length} av ${badges.length}</span></h3>
+    <div class="card" style="padding:4px 14px">${earned.concat(locked).map(b => `<div class="badge${b[2] ? '' : ' off'}">${medal(b[2], b[2] ? '★' : '?')}<div><div style="font-weight:800">${esc(b[0])}</div><div class="small mute">${esc(b[1])}</div></div></div>`).join('')}</div>
+    ${recs.length ? `<h3 style="margin:18px 0 8px">Rekord</h3><div class="card">${recs.map(([l, x]) => `<div class="spread" style="padding:4px 0;font-size:14px"><span>${l}</span><span><b>${esc(x.s.data.name)}</b> ${flag(x.s.data.cc)} <span class="small mute">${esc(x.t.data.title)}</span></span></div>`).join('')}${longest ? `<div class="spread" style="padding:4px 0;font-size:14px"><span>Längsta etappen</span><b>${nf(longest)} km</b></div>` : ''}</div>` : ''}
+  </div>`;
+  const pp = $('#pp'); if (pp) pp.onclick = e => { const b = e.target.closest('[data-p]'); if (b) { passPerson = b.dataset.p; render(); } };
 }
 
 /* ---------------- start ---------------- */

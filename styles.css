@@ -102,3 +102,15 @@ nav#nav a.on{color:var(--ink);font-weight:800;border-top-color:var(--ink)}
 .ranks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 18px;margin-top:8px}
 @media(max-width:360px){.ranks{grid-template-columns:minmax(0,1fr)}}
 .kpi span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.passhead{color:#fff;border-radius:18px;padding:16px 18px;box-shadow:0 6px 18px #0002}
+.passnums{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:12px}
+.passnums b{display:block;font-size:22px;font-weight:800;line-height:1.1}
+.passnums span{font-size:12px;opacity:.9}
+.stamps{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:12px}
+.stamp{aspect-ratio:1;border:4px double var(--c);border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--c);transform:rotate(var(--r));padding:8px;background:#fff}
+.stamp .f{font-size:28px;line-height:1.1}
+.stamp .n{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.3px;line-height:1.15;margin-top:2px}
+.stamp .d{font-size:10px;margin-top:2px}
+.badge{display:flex;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid #e9eeef}
+.badge:last-child{border-bottom:0}
+.badge.off{opacity:.55}
