@@ -9,12 +9,14 @@ const sb = createClient(SB_URL, SB_KEY, { auth: { persistSession: true, autoRefr
 /* ---------------- konstanter ---------------- */
 const MODES = {
   bil:   { n: 'Egen bil', c: '#e4572e', d: 'solid', w: 4,   r: 'car' },
+  hyrbil:{ n: 'Hyrbil',   c: '#9a4a14', d: 'solid', w: 4,   r: 'car' },
   taxi:  { n: 'Taxi',     c: '#c99700', d: 'solid', w: 3.5, r: 'car' },
   buss:  { n: 'Buss',     c: '#2a9d8f', d: 'dash',  w: 4,   r: 'car' },
   tag:   { n: 'Tåg',      c: '#3d3dbd', d: 'solid', w: 5,   r: 'rail' },
   flyg:  { n: 'Flyg',     c: '#d6127e', d: 'dash',  w: 3,   r: 'air' },
   bat:   { n: 'Båt',      c: '#0096c7', d: 'dot',   w: 4,   r: 'sea' },
-  cykel: { n: 'Cykel',    c: '#3c8d2f', d: 'dot',   w: 3.5, r: 'bike' }
+  cykel: { n: 'Cykel',    c: '#3c8d2f', d: 'dot',   w: 3.5, r: 'bike' },
+  ga:    { n: 'Gå/vandra', c: '#6b5a45', d: 'dot',   w: 3,   r: 'foot' }
 };
 const KINDS = ['Dagbok', 'Upplevelse', 'Mat', 'Boende', 'Sevärdhet'];
 const MEMBER_COLORS = ['#c46a00', '#2f5fc4', '#7a3fb0', '#2a7a2a'];
@@ -204,8 +206,8 @@ function legs(t) {
 /* ---------------- ruttsökning ---------------- */
 async function fetchRoute(a, b) {
   const m = MODES[b.data.mode] || MODES.bil, A = pos(a), B = pos(b);
-  if (m.r === 'car' || m.r === 'bike') {
-    const prof = m.r === 'car' ? 'routed-car' : 'routed-bike';
+  if (m.r === 'car' || m.r === 'bike' || m.r === 'foot') {
+    const prof = { car: 'routed-car', bike: 'routed-bike', foot: 'routed-foot' }[m.r];
     const r = await fetch(`https://routing.openstreetmap.de/${prof}/route/v1/driving/${A[0]},${A[1]};${B[0]},${B[1]}?overview=full&geometries=geojson`);
     if (!r.ok) throw new Error('route ' + r.status);
     const j = await r.json(); return j.routes && j.routes[0] && j.routes[0].geometry.coordinates;
@@ -231,7 +233,7 @@ async function routePending() {
     const st = stopsOf(t.id).filter(hasPos);
     for (let i = 1; i < st.length; i++) {
       const a = st[i - 1], b = st[i], m = MODES[b.data.mode] || MODES.bil;
-      if (!['car', 'bike', 'rail'].includes(m.r)) continue;
+      if (!['car', 'bike', 'foot', 'rail'].includes(m.r)) continue;
       const key = routeKey(a, b);
       if (b.data.route_key === key || b.data.route_fail === key) continue;
       if (hav(pos(a), pos(b)) > 2500) { await saveDoc('stop', { route_fail: key }, b.id); continue; }
@@ -562,7 +564,7 @@ function viewKarta(main, t) {
     <div class="row"><button class="pri" id="play" style="flex:1">Spela upp resan</button><button id="rec" style="flex:1">Spara som video</button></div>
     <div class="row" style="margin-top:8px"><span class="small mute">Fart</span><div class="seg" id="speed" style="flex:1"><button data-s="0.6">Lugn</button><button data-s="1" class="on">Normal</button><button data-s="2">Snabb</button></div></div>
     <div class="legend">${Object.values(MODES).map(m => `<span><svg width="24" height="8" aria-hidden="true"><line x1="2" y1="4" x2="22" y2="4" stroke="${m.c}" stroke-width="${m.w}" stroke-linecap="round" ${m.d === 'dash' ? 'stroke-dasharray="7 4"' : m.d === 'dot' ? 'stroke-dasharray="0.1 7"' : ''}/></svg>${m.n}</span>`).join('')}</div>
-    <p class="small mute">${L.length} etapper · ${nf(L.reduce((s, l) => s + l.km, 0))} km${L.some(l => !l.routed && ['car', 'bike', 'rail'].includes(l.m.r)) ? ' · vissa rutter räknas ut när du är uppkopplad' : ''}</p>
+    <p class="small mute">${L.length} etapper · ${nf(L.reduce((s, l) => s + l.km, 0))} km${L.some(l => !l.routed && ['car', 'bike', 'foot', 'rail'].includes(l.m.r)) ? ' · vissa rutter räknas ut när du är uppkopplad' : ''}</p>
     ${vids.length ? `<h3 style="margin-top:12px">Videor</h3>${vids.map(v => `<div class="spread card" style="padding:10px 14px;margin:8px 0 0"><span>${esc(new Date(v.data.created).toLocaleString('sv-SE', { dateStyle: 'medium', timeStyle: 'short' }))}${v.data.pending ? ' <span class="small mute">· laddas upp</span>' : ''}</span><button class="sm" data-vid="${v.id}">Visa</button></div>`).join('')}` : ''}
   </div>`;
   detachMap();
@@ -1194,7 +1196,7 @@ function viewPass(main) {
     ['Ekvatorn', 'Varit både norr och söder om ekvatorn', lats.some(x => x > 0) && lats.some(x => x < 0)],
     ['Polcirkeln', 'Varit norr om polcirkeln', lats.some(x => x >= 66.56)],
     ['Långflygare', 'En etapp över 5 000 km', longest >= 5000],
-    ['Alla färdmedel', 'Rest med alla sju färdmedel', Object.keys(MODES).every(m => modes.has(m))],
+    ['Alla färdmedel', 'Rest med alla nio färdmedel', Object.keys(MODES).every(m => modes.has(m))],
     ['Tusen kilometer', 'Rest 1 000 km', km >= 1000],
     ['Tiotusen kilometer', 'Rest 10 000 km', km >= 10000],
     ['Jorden runt', 'Rest 40 075 km – ett varv runt jorden', km >= 40075],
