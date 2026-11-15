@@ -69,15 +69,90 @@ const photosOfTrip = t => ofKind('photo').filter(p => p.data.trip === t);
 const videosOf = t => ofKind('video').filter(v => v.data.trip === t);
 function tripRange(t) { const ds = ofKind('stop').filter(s => s.data.trip === t.id && s.data.date).map(s => s.data.date).sort(); return [ds[0], ds[ds.length - 1]]; }
 const curTrip = () => { const t = S.docs.get(S.trip); return live(t) ? t : trips()[0]; };
-const memberName = id => (S.members.find(m => m.user_id === id) || {}).name || '?';
-const memberColor = id => MEMBER_COLORS[Math.max(0, S.members.findIndex(m => m.user_id === id)) % MEMBER_COLORS.length];
-const isAll = tr => !tr || !tr.length;
+const PERSON_COLORS = ['#c46a00', '#2f5fc4', '#7a3fb0', '#2a7a2a', '#c2185b', '#00838f', '#6d4c41', '#5c6bc0', '#9e9d24', '#d84315'];
+const persons = () => ofKind('person').sort((a, b) => (a.data.order ?? 99) - (b.data.order ?? 99) || (a.data.name || '').localeCompare(b.data.name || '', 'sv'));
+const personById = id => { const p = S.docs.get(id); return live(p) && p.kind === 'person' ? p : null; };
+const personForUser = uid => persons().find(p => p.data.user_id === uid) || null;
+const pidForUser = uid => 'a0' + uid.slice(2);
+const toPid = id => personById(id) ? id : (personForUser(id) || {}).id;
+const personName = id => { const p = personById(id) || personForUser(id); return p ? p.data.name : ((S.members.find(m => m.user_id === id) || {}).name || '?'); };
+const personColor = id => { const p = personById(id) || personForUser(id); return (p && p.data.color) || PERSON_COLORS[0]; };
+const memberName = personName, memberColor = personColor;
+const allIds = () => persons().map(p => p.id);
+const allLabel = () => persons().length > 2 ? 'Alla' : 'Båda';
+const initials = n => (n || '?').split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
+const travelersOf = tr => { const ids = allIds(); if (!tr || !tr.length) return ids; const r = [...new Set(tr.map(toPid).filter(Boolean))]; return r.length ? r : ids; };
+const isAll = tr => { const ids = allIds(), t = travelersOf(tr); return ids.every(id => t.includes(id)); };
 function whoBadge(tr) {
-  if (isAll(tr)) return `<span class="who all">${S.members.length > 2 ? 'Alla' : 'Båda'}</span>`;
-  return tr.map(id => `<span class="who" style="color:${memberColor(id)}">${esc(memberName(id))}</span>`).join(' ');
+  if (persons().length <= 1) return '';
+  const ids = travelersOf(tr);
+  if (isAll(tr)) return `<span class="who all">${allLabel()}</span>`;
+  if (ids.length <= 2) return ids.map(id => `<span class="who" style="color:${personColor(id)}">${esc(personName(id))}</span>`).join(' ');
+  return `<span class="pdots">${ids.map(id => `<span class="pdot" style="background:${personColor(id)}" title="${esc(personName(id))}">${esc(initials(personName(id)))}</span>`).join('')}</span>`;
+}
+function whoPicker(el, initial) {
+  let sel = travelersOf(initial);
+  if (persons().length <= 1) { const w = el.closest('.whowrap'); if (w) w.remove(); return () => allIds(); }
+  const draw = () => {
+    const all = isAll(sel);
+    el.innerHTML = `<button type="button" class="chip${all ? ' on' : ''}" data-w="all" style="${all ? `background:${BOTH_COLOR};border-color:${BOTH_COLOR}` : ''}">${allLabel()}</button>` +
+      persons().map(p => { const on = !all && sel.includes(p.id); return `<button type="button" class="chip${on ? ' on' : ''}" data-w="${p.id}" style="${on ? `background:${p.data.color};border-color:${p.data.color}` : `color:${p.data.color};border-color:${p.data.color}`}">${esc(p.data.name)}</button>`; }).join('');
+  };
+  el.onclick = e => {
+    const x = e.target.closest('[data-w]'); if (!x) return;
+    if (x.dataset.w === 'all') sel = allIds();
+    else if (isAll(sel)) sel = [x.dataset.w];
+    else { const st = new Set(sel); st.has(x.dataset.w) ? st.delete(x.dataset.w) : st.add(x.dataset.w); sel = st.size ? [...st] : allIds(); }
+    draw();
+  };
+  draw();
+  return () => sel.slice();
+}
+let peopleBusy = false;
+async function ensurePeople() {
+  if (peopleBusy || !S.group || !S.members.length || !S.user) return;
+  peopleBusy = true;
+  try {
+    let changed = false;
+    for (const m of S.members) {
+      if (!personForUser(m.user_id)) {
+        const used = persons().map(p => p.data.color);
+        await saveDoc('person', { name: m.name, color: PERSON_COLORS.find(c => !used.includes(c)) || PERSON_COLORS[0], user_id: m.user_id, order: persons().length }, pidForUser(m.user_id));
+        changed = true;
+      }
+    }
+    const meta = S.docs.get(S.group);
+    if (!(meta && meta.data && meta.data.peopleV1)) {
+      for (const st of ofKind('stop')) {
+        const tr = st.data.travelers || [], nt = travelersOf(tr);
+        if (!tr.length || tr.some(id => !personById(id))) await saveDoc('stop', { travelers: nt }, st.id);
+      }
+      await saveDoc('meta', { ...((meta && meta.data) || {}), peopleV1: true }, S.group);
+      changed = true;
+    }
+    if (changed) render();
+    if (await idbGet('kv', 'askWho')) { await idbDel('kv', 'askWho'); whoAmIDlg(); }
+  } finally { peopleBusy = false; }
+}
+function whoAmIDlg() {
+  const mine = personForUser(S.user.id), free = persons().filter(p => !p.data.user_id);
+  if (!free.length) return;
+  openDlg(`<h2>Vem är du?</h2><p class="small mute">Finns du redan med som person i dagboken? Välj dig själv, så kopplas dina tidigare resor till ditt konto.</p>
+    <div id="mel" style="display:flex;flex-direction:column;gap:8px;margin-top:8px">${free.map(p => `<button data-me="${p.id}" style="justify-content:flex-start"><span class="dot" style="background:${p.data.color}"></span>${esc(p.data.name)}</button>`).join('')}<button data-me="" class="pri">Jag är ny i dagboken</button></div>`);
+  $('#mel').onclick = async e => {
+    const b = e.target.closest('[data-me]'); if (!b) return;
+    const pid = b.dataset.me;
+    if (pid) {
+      await saveDoc('person', { user_id: S.user.id }, pid);
+      if (mine && mine.id !== pid) {
+        for (const st of ofKind('stop')) if ((st.data.travelers || []).includes(mine.id)) await saveDoc('stop', { travelers: st.data.travelers.map(x => x === mine.id ? pid : x) }, st.id);
+        await deleteDoc(mine.id);
+      }
+    }
+    closeDlg(); render();
+  };
 }
 const homeOf = () => { const d = S.user && S.docs.get(S.user.id); return live(d) && d.kind === 'home' && d.data.lat != null ? d.data : null; };
-const travelersOf = tr => isAll(tr) ? S.members.map(m => m.user_id) : tr;
 
 async function saveDoc(kind, data, id) {
   const old = id && S.docs.get(id);
@@ -287,6 +362,7 @@ async function sync() {
     }
     if (data && data.length) await idbPut('kv', S.lastPull, 'lastPull');
     await loadMembers();
+    await ensurePeople();
     S.lastSync = new Date();
     if (changed) render();
     if (data && data.length === 1000) setTimeout(sync, 100);
@@ -295,8 +371,9 @@ async function sync() {
   S.syncing = false; updateSyncLabel();
 }
 async function loadMembers() {
-  const { data } = await sb.from('members').select('user_id,name,joined_at').eq('group_id', S.group).order('joined_at');
-  if (data) { S.members = data; await idbPut('kv', data, 'members'); }
+  let r = await sb.from('members').select('user_id,name,joined_at,role').eq('group_id', S.group).order('joined_at');
+  if (r.error) r = await sb.from('members').select('user_id,name,joined_at').eq('group_id', S.group).order('joined_at');
+  if (r.data) { S.members = r.data; await idbPut('kv', r.data, 'members'); }
   const g = await sb.from('groups').select('join_code').eq('id', S.group).maybeSingle();
   if (g.data) { S.joinCode = g.data.join_code; await idbPut('kv', S.joinCode, 'joinCode'); }
 }
@@ -312,9 +389,11 @@ function confirmDlg(title, text, yes, fn) {
 }
 
 /* ---------------- inloggning ---------------- */
+const inviteCode = () => { try { return localStorage.getItem('rdJoin') || ''; } catch (e) { return ''; } };
+const clearInvite = () => { try { localStorage.removeItem('rdJoin'); } catch (e) {} };
 function renderAuth(msg = '') {
   $('#app').innerHTML = `<div class="center" style="max-width:420px;margin:0 auto;text-align:left;align-items:stretch">
-    <h1>Resdagboken</h1><p class="mute">Logga in för att spara och dela era resor.</p>
+    <h1>Resdagboken</h1><p class="mute">${inviteCode() ? 'Du har blivit inbjuden till en resdagbok. Skapa ett konto eller logga in för att gå med.' : 'Logga in för att spara och dela era resor.'}</p>
     <form id="af"><label for="em">E-post</label><input id="em" type="email" autocomplete="email" required>
     <label for="pw">Lösenord</label><input id="pw" type="password" autocomplete="current-password" minlength="6" required>
     <div class="row" style="margin-top:16px"><button class="pri" style="flex:1">Logga in</button><button type="button" id="su" style="flex:1">Skapa konto</button></div></form>
@@ -334,12 +413,12 @@ function renderAuth(msg = '') {
 function renderOnboard() {
   $('#app').innerHTML = `<div class="center" style="max-width:420px;margin:0 auto;text-align:left;align-items:stretch">
     <h1>Välkommen</h1><label for="nm">Ditt namn</label><input id="nm" placeholder="t.ex. Rickard">
-    <div class="card" style="margin-top:16px"><h3>Ny gemensam dagbok</h3><p class="small mute">Du får en kod som den du reser med använder för att gå med.</p><button class="pri" id="cg" style="width:100%">Skapa dagbok</button></div>
-    <div class="card"><h3>Gå med med kod</h3><input id="jc" placeholder="Kod, t.ex. 4F2A9C" autocapitalize="characters"><button id="jg" style="width:100%;margin-top:8px">Gå med</button></div>
+    <div class="card"${inviteCode() ? ' style="margin-top:16px"' : ' style="margin-top:16px;order:-1"'}><h3>${inviteCode() ? 'Gå med i dagboken du blivit inbjuden till' : 'Gå med med kod'}</h3><input id="jc" placeholder="Kod, t.ex. 4F2A9C" autocapitalize="characters" value="${esc(inviteCode())}"><button id="jg" class="${inviteCode() ? 'pri' : ''}" style="width:100%;margin-top:8px">Gå med</button></div>
+    <div class="card"><h3>Ny dagbok</h3><p class="small mute">För dig själv, för er två eller för hela familjen. Fler kan bjudas in senare.</p><button class="${inviteCode() ? '' : 'pri'}" id="cg" style="width:100%">Skapa dagbok</button></div>
     <p class="small mute" id="om"></p><button class="ghost" id="lo">Logga ut</button></div>`;
   const nm = () => $('#nm').value.trim();
-  $('#cg').onclick = async () => { if (!nm()) return $('#om').textContent = 'Skriv ditt namn först.'; const { data, error } = await sb.rpc('create_group', { p_member_name: nm() }); if (error) return $('#om').textContent = error.message; await setGroup(data); };
-  $('#jg').onclick = async () => { if (!nm()) return $('#om').textContent = 'Skriv ditt namn först.'; const { data, error } = await sb.rpc('join_group', { p_code: $('#jc').value, p_member_name: nm() }); if (error) return $('#om').textContent = error.message === 'Fel kod' ? 'Koden stämmer inte.' : error.message; await setGroup(data); };
+  $('#cg').onclick = async () => { if (!nm()) return $('#om').textContent = 'Skriv ditt namn först.'; const { data, error } = await sb.rpc('create_group', { p_member_name: nm() }); if (error) return $('#om').textContent = error.message; clearInvite(); await setGroup(data); };
+  $('#jg').onclick = async () => { if (!nm()) return $('#om').textContent = 'Skriv ditt namn först.'; const { data, error } = await sb.rpc('join_group', { p_code: $('#jc').value, p_member_name: nm() }); if (error) return $('#om').textContent = error.message === 'Fel kod' ? 'Koden stämmer inte.' : error.message; clearInvite(); await idbPut('kv', true, 'askWho'); await setGroup(data); };
   $('#lo').onclick = logout;
 }
 async function setGroup(g) { S.group = g; await idbPut('kv', g, 'group'); await sync(); startApp(); }
@@ -351,6 +430,7 @@ async function afterLogin(user) {
     if (!data.length) return renderOnboard();
     S.group = data[0].group_id; await idbPut('kv', S.group, 'group');
   }
+  if (inviteCode()) { clearInvite(); setTimeout(() => toast('Du är redan med i en dagbok'), 800); }
   startApp(); sync();
 }
 async function logout() {
@@ -402,7 +482,7 @@ function tripDlg(t) {
   $('#f', b).onsubmit = async e => {
     e.preventDefault(); const title = $('#tt').value.trim(); if (!title) return;
     const d = await saveDoc('trip', { title, album: $('#ta').value.trim(), created: t ? t.data.created : new Date().toISOString() }, t && t.id);
-    if (!t && $('#th') && $('#th').checked) { const h = homeOf(); await saveDoc('stop', { trip: d.id, name: h.name, sub: h.sub || '', lat: h.lat, lon: h.lon, cc: h.cc, date: $('#tdd').value, mode: '', travelers: [], via: [], seq: 1 }); }
+    if (!t && $('#th') && $('#th').checked) { const h = homeOf(); await saveDoc('stop', { trip: d.id, name: h.name, sub: h.sub || '', lat: h.lat, lon: h.lon, cc: h.cc, date: $('#tdd').value, mode: '', travelers: allIds(), via: [], seq: 1 }); }
     S.trip = d.id; idbPut('kv', d.id, 'trip'); closeDlg(); if (!t) location.hash = 'etapper'; render();
   };
   if (t) $('#del').onclick = () => confirmDlg(`Ta bort ”${t.data.title}”?`, 'Resan, dess platser och inlägg tas bort för er båda.', 'Ta bort', async () => {
@@ -621,16 +701,16 @@ async function lookupFlight(raw) {
 }
 function flightDlg(t) {
   const st = stopsOf(t.id), last = st[st.length - 1];
-  let found = [], who = [];
+  let found = [];
   const b = openDlg(`<h2>Lägg till flyg</h2>
     <label for="fc">Flygnummer i den ordning du flög</label><input id="fc" placeholder="t.ex. SK1415, QR160" autocapitalize="characters" autocomplete="off">
     <p class="small mute" style="margin:4px 0 0">Separera med komma. Flygen hämtas från en öppen flygdatabas – kontrollera att sträckan stämmer.</p>
     <label for="fd">Datum</label><input id="fd" type="date" value="${esc(last ? last.data.date || today() : today())}">
-    <label>Vem reste?</label><div class="seg" id="who"><button type="button" data-w="all" class="on">${S.members.length > 2 ? 'Alla' : 'Båda'}</button>${S.members.map(m => `<button type="button" data-w="${m.user_id}">${esc(m.name)}</button>`).join('')}</div>
+    <div class="whowrap"><label>Vem reste?</label><div class="chips" id="who"></div></div>
     <label style="display:flex;gap:10px;align-items:center;font-weight:600"><input type="checkbox" id="fv" checked style="width:22px;min-height:22px"> Byten räknas som mellanlandning (en etapp)</label>
     <div id="fres"></div>
     <div class="row end" style="margin-top:16px"><button type="button" data-close>Avbryt</button><button type="button" id="fget">Hämta flyg</button><button class="pri" id="fok" disabled>Lägg till</button></div>`);
-  $('#who').onclick = e => { const x = e.target.closest('[data-w]'); if (!x) return; who = x.dataset.w === 'all' ? [] : [x.dataset.w]; $('#who').querySelectorAll('button').forEach(y => y.classList.toggle('on', y === x)); };
+  const getWho = whoPicker($('#who'), last ? last.data.travelers : null);
   const show = () => {
     if (!found.length) return;
     const near = last && hasPos(last) && found[0].f && hav(pos(last), [found[0].f.from.lon, found[0].f.from.lat]) < 60;
@@ -651,7 +731,7 @@ function flightDlg(t) {
     const ok = found.filter(x => x.f).map(x => x.f); if (!ok.length) return;
     const date = $('#fd').value, viaMode = $('#fv').checked;
     let seq = (last ? (last.data.seq || 0) : 0) + 1, prev = last;
-    const addStop = async (p, mode, via) => { const d = await saveDoc('stop', { trip: t.id, name: p.name, sub: p.sub, lat: p.lat, lon: p.lon, cc: p.cc, date, mode, travelers: who, via: via || [], seq: seq++ }); prev = d; };
+    const addStop = async (p, mode, via) => { const d = await saveDoc('stop', { trip: t.id, name: p.name, sub: p.sub, lat: p.lat, lon: p.lon, cc: p.cc, date, mode, travelers: getWho(), via: via || [], seq: seq++ }); prev = d; };
     if (!(prev && hasPos(prev) && hav(pos(prev), [ok[0].from.lon, ok[0].from.lat]) < 60)) await addStop(ok[0].from, prev ? 'bil' : '');
     if (viaMode) {
       const via = ok.slice(0, -1).map(f => ({ name: f.to.name, lat: f.to.lat, lon: f.to.lon, cc: f.to.cc }));
@@ -668,7 +748,7 @@ function flightDlg(t) {
 function stopDlg(t, s, preset) {
   const st = stopsOf(t.id), isFirst = s ? st[0] && st[0].id === s.id : !st.length;
   const last = st[st.length - 1];
-  const D = s ? JSON.parse(JSON.stringify(s.data)) : { trip: t.id, name: '', date: last ? last.data.date : today(), mode: 'bil', travelers: [], via: [], seq: (last ? (last.data.seq || 0) : 0) + 1 };
+  const D = s ? JSON.parse(JSON.stringify(s.data)) : { trip: t.id, name: '', date: last ? last.data.date : today(), mode: 'bil', travelers: last ? travelersOf(last.data.travelers) : allIds(), via: [], seq: (last ? (last.data.seq || 0) : 0) + 1 };
   if (preset && !s) Object.assign(D, { name: preset.name, sub: preset.sub || '', lat: preset.lat, lon: preset.lon, cc: preset.cc });
   if (!D.via) D.via = []; if (!D.travelers) D.travelers = [];
   const home = homeOf();
@@ -676,7 +756,7 @@ function stopDlg(t, s, preset) {
     <label>Plats</label><div id="sb"></div>${home ? `<button type="button" class="sm" id="usehome" style="margin-top:6px">Hem: ${esc(home.name)}</button>` : ''}<div id="picked" class="note"${D.lat != null ? '' : ' hidden'}></div>
     ${isFirst ? '' : `<label>Färdmedel hit</label><div class="chips" id="modes">${Object.entries(MODES).map(([k, m]) => `<button type="button" class="chip" data-m="${k}">${m.n}</button>`).join('')}</div>
     <div id="viabox" hidden><label>Mellanlandningar</label><div id="vias"></div><div id="vsb" style="margin-top:6px"></div><p class="small mute" style="margin:4px 0 0">Räknas inte som besökt land.</p></div>`}
-    <label>Vem reste?</label><div class="seg" id="who"><button type="button" data-w="all">${S.members.length > 2 ? 'Alla' : 'Båda'}</button>${S.members.map(m => `<button type="button" data-w="${m.user_id}">${esc(m.name)}</button>`).join('')}</div>
+    <div class="whowrap"><label>Vem reste?</label><div class="chips" id="who"></div></div>
     <label for="sd">Datum</label><input id="sd" type="date" value="${esc(D.date || '')}">
     <div class="row end" style="margin-top:16px">${s ? '<button type="button" id="up" class="sm">↑</button><button type="button" id="dn" class="sm">↓</button><button type="button" id="del">Ta bort</button>' : ''}<button type="button" data-close>Avbryt</button><button class="pri" id="ok">Spara</button></div>`);
   const showPicked = () => { const p = $('#picked'); p.hidden = D.lat == null; p.innerHTML = D.lat != null ? `${flag(D.cc)} <b>${esc(D.name)}</b> ${D.sub ? '· ' + esc(D.sub) : ''}` : ''; };
@@ -685,20 +765,18 @@ function stopDlg(t, s, preset) {
   if ($('#usehome')) $('#usehome').onclick = () => { Object.assign(D, { name: home.name, sub: home.sub || '', lat: home.lat, lon: home.lon, cc: home.cc }); inp.value = home.name; showPicked(); };
   const renderModes = () => { if (!$('#modes')) return; $('#modes').querySelectorAll('[data-m]').forEach(x => { const on = x.dataset.m === D.mode; x.classList.toggle('on', on); x.style.background = on ? MODES[x.dataset.m].c : ''; x.style.borderColor = on ? MODES[x.dataset.m].c : ''; }); $('#viabox').hidden = D.mode !== 'flyg'; };
   const renderVias = () => { if (!$('#vias')) return; $('#vias').innerHTML = D.via.map((v, i) => `<div class="spread" style="padding:4px 0"><span>${flag(v.cc)} ${esc(v.name)}</span><button type="button" class="sm" data-rv="${i}" aria-label="Ta bort">✕</button></div>`).join(''); };
-  const renderWho = () => $('#who').querySelectorAll('[data-w]').forEach(x => x.classList.toggle('on', x.dataset.w === 'all' ? isAll(D.travelers) : !isAll(D.travelers) && D.travelers.includes(x.dataset.w)));
   if ($('#modes')) {
     $('#modes').onclick = e => { const x = e.target.closest('[data-m]'); if (x) { D.mode = x.dataset.m; renderModes(); } };
     $('#vias').onclick = e => { const x = e.target.closest('[data-rv]'); if (x) { D.via.splice(+x.dataset.rv, 1); renderVias(); } };
     const vin = searchBox($('#vsb'), p => { D.via.push({ name: p.name, lat: p.lat, lon: p.lon, cc: p.cc }); vin.value = ''; renderVias(); }, '+ Lägg till mellanlandning (sök flygplats)');
     renderModes(); renderVias();
   }
-  $('#who').onclick = e => { const x = e.target.closest('[data-w]'); if (!x) return; D.travelers = x.dataset.w === 'all' ? [] : [x.dataset.w]; renderWho(); };
-  renderWho();
+  const getWho = whoPicker($('#who'), D.travelers);
   $('#ok').onclick = async () => {
     const typed = inp.value.trim();
     if (!typed) { toast('Skriv eller sök en plats'); return; }
     D.name = typed;
-    D.date = $('#sd').value; if (isFirst) D.mode = '';
+    D.date = $('#sd').value; D.travelers = getWho(); if (isFirst) D.mode = '';
     if (D.mode !== 'flyg') D.via = [];
     await saveDoc('stop', D, s && s.id); closeDlg(); render();
   };
@@ -776,26 +854,50 @@ function entryDlg(t, e) {
 }
 
 /* ---------------- statistik ---------------- */
-function visited() {
+/* personfilter för Världen och Topplistor */
+let selPeople = null;
+const selIds = () => { const ids = allIds(); const sl = (selPeople || ids).filter(id => ids.includes(id)); return sl.length ? sl : ids; };
+function personFilter() {
+  const ps = persons(); if (ps.length <= 1) return '';
+  const sel = selIds(), all = sel.length === ps.length;
+  return `<div class="chips" id="pf" style="margin-bottom:12px"><button class="chip${all ? ' on' : ''}" data-p="all" style="${all ? `background:${BOTH_COLOR};border-color:${BOTH_COLOR}` : ''}">${allLabel()}</button>${ps.map(p => { const on = !all && sel.includes(p.id); return `<button class="chip${on ? ' on' : ''}" data-p="${p.id}" style="${on ? `background:${p.data.color};border-color:${p.data.color}` : `color:${p.data.color};border-color:${p.data.color}`}">${esc(p.data.name)}</button>`; }).join('')}</div>`;
+}
+function bindPersonFilter(main) {
+  const el = main.querySelector('#pf'); if (!el) return;
+  el.onclick = e => {
+    const b = e.target.closest('[data-p]'); if (!b) return;
+    const ids = allIds(), cur = selIds(), all = cur.length === ids.length;
+    if (b.dataset.p === 'all') selPeople = null;
+    else if (all) selPeople = [b.dataset.p];
+    else { const st = new Set(cur); st.has(b.dataset.p) ? st.delete(b.dataset.p) : st.add(b.dataset.p); selPeople = st.size && st.size < ids.length ? [...st] : null; }
+    render();
+  };
+}
+function visitData() {
   const C = new Map(), V = new Map();
   for (const t of trips()) for (const s of stopsOf(t.id)) {
-    if (s.data.cc) {
-      if (!C.has(s.data.cc)) C.set(s.data.cc, { all: false, ids: new Set() });
-      const v = C.get(s.data.cc);
-      if (isAll(s.data.travelers)) v.all = true; else s.data.travelers.forEach(id => v.ids.add(id));
-    }
-    for (const x of s.data.via || []) if (x.cc) V.set(x.cc, (V.get(x.cc) || 0) + 1);
+    const tr = travelersOf(s.data.travelers);
+    if (s.data.cc) { if (!C.has(s.data.cc)) C.set(s.data.cc, new Set()); tr.forEach(id => C.get(s.data.cc).add(id)); }
+    for (const x of s.data.via || []) if (x.cc) { if (!V.has(x.cc)) V.set(x.cc, new Set()); tr.forEach(id => V.get(x.cc).add(id)); }
   }
-  const has = (v, id) => v.all || v.ids.has(id);
-  const cat = cc => {
-    const v = C.get(cc); if (!v) return V.has(cc) ? 'M' : null;
-    if (v.all || (S.members.length > 1 && S.members.every(m => v.ids.has(m.user_id)))) return 'B';
-    const idx = S.members.findIndex(m => v.ids.has(m.user_id));
-    return v.ids.size === 1 && idx >= 0 ? 'm' + idx : 'B';
-  };
-  return { C, V, cat, has };
+  return { C, V };
 }
-const catColor = c => c === 'B' ? BOTH_COLOR : c === 'M' ? '#ffffff' : c ? MEMBER_COLORS[+c.slice(1) % MEMBER_COLORS.length] : null;
+function catFor(set, viaSet, sel) {
+  const n = set ? sel.filter(id => set.has(id)).length : 0;
+  if (!n) return viaSet && sel.some(id => viaSet.has(id)) ? 'M' : null;
+  if (sel.length === 1) return 'p:' + sel[0];
+  if (n === sel.length) return 'B';
+  if (sel.length === 2) return 'p:' + sel.find(id => set.has(id));
+  return 'S';
+}
+const SOME_COLOR = '#8cc3c6';
+const catColor = c => c === 'B' ? BOTH_COLOR : c === 'S' ? SOME_COLOR : c === 'M' ? '#ffffff' : c && c.startsWith('p:') ? personColor(c.slice(2)) : null;
+function catLabel(c, sel) {
+  if (c === 'B') return sel.length === 2 ? sel.map(personName).join(' och ') : sel.length === allIds().length ? 'Alla' : 'Alla valda';
+  if (c === 'S') return 'Några av de valda';
+  if (c === 'M') return 'Bara mellanlandning';
+  return (sel.length === 1 ? '' : 'Bara ') + personName(c.slice(2));
+}
 
 let wmap, wReady = false, countries = null, wHolder;
 async function loadCountries() {
@@ -809,16 +911,20 @@ async function loadCountries() {
   return countries = j;
 }
 function viewVarlden(main) {
-  const { C, V, cat, has } = visited();
-  const per = S.members.map((m, i) => ({ m, i, n: [...C.values()].filter(v => has(v, m.user_id)).length }));
-  const both = [...C.keys()].filter(cc => cat(cc) === 'B').length;
-  const groups = [['B', S.members.length > 2 ? 'Alla' : 'Båda']].concat(S.members.map((m, i) => ['m' + i, 'Bara ' + m.name])).concat([['M', 'Bara mellanlandning']]);
+  const sel = selIds(), { C, V } = visitData();
+  const cat = cc => catFor(C.get(cc), V.get(cc), sel);
   const allCc = new Set([...C.keys(), ...V.keys()]);
-  const byCat = k => [...allCc].filter(cc => cat(cc) === k).sort((a, b) => cName(a).localeCompare(cName(b), 'sv'));
-  main.innerHTML = `<div class="pad">
-    <div class="kpis"><div class="kpi" style="background:${BOTH_COLOR}"><b>${both}</b><span>Tillsammans</span></div>${per.slice(0, 2).map(p => `<div class="kpi" style="background:${MEMBER_COLORS[p.i]}"><b>${p.n}</b><span>${esc(p.m.name)} totalt</span></div>`).join('')}</div>
-    <div id="wmapbox" style="margin-top:12px"><div id="wmap"></div></div><p class="small mute" style="margin:6px 0 0">Punkterna är platserna ni varit på, i samma färger som länderna. Tryck på en punkt för namn och resa.</p>
-    <div style="margin-top:12px">${groups.map(([k, label]) => { const l = byCat(k); return l.length ? `<div class="cl"><i style="background:${catColor(k)};${k === 'M' ? 'border:2px dashed #6b7a80' : ''}"></i><span><b>${esc(label)} (${l.length}):</b> ${l.map(cc => `${flag(cc)} ${esc(cName(cc))}`).join(', ')}</span></div>` : ''; }).join('') || '<div class="empty">Lägg till platser i en resa så färgas länderna här.</div>'}</div></div>`;
+  const kp = [];
+  if (sel.length > 1) kp.push({ n: [...C.values()].filter(st => sel.every(id => st.has(id))).length, label: sel.length === 2 ? 'Tillsammans' : sel.length === allIds().length ? 'Alla tillsammans' : 'Alla valda', col: BOTH_COLOR });
+  sel.forEach(id => kp.push({ n: [...C.values()].filter(st => st.has(id)).length, label: personName(id) + (sel.length > 1 ? ' totalt' : ''), col: personColor(id) }));
+  const cats = sel.length === 1 ? ['p:' + sel[0], 'M'] : sel.length === 2 ? ['B', 'p:' + sel[0], 'p:' + sel[1], 'M'] : ['B', 'S', 'M'];
+  const byCat = k => [...allCc].filter(cc => cat(cc) === k).sort((x, y) => cName(x).localeCompare(cName(y), 'sv'));
+  const who = cc => cat(cc) === 'S' ? ` <span class="small mute">(${sel.filter(id => C.get(cc).has(id)).map(personName).map(esc).join(', ')})</span>` : '';
+  main.innerHTML = `<div class="pad">${personFilter()}
+    <div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(104px,1fr))">${kp.map(k => `<div class="kpi" style="background:${k.col}"><b>${k.n}</b><span>${esc(k.label)}</span></div>`).join('')}</div>
+    <div id="wmapbox" style="margin-top:12px"><div id="wmap"></div></div><p class="small mute" style="margin:6px 0 0">Punkterna är platserna ${sel.length === 1 ? esc(personName(sel[0])) + ' varit på' : 'ni varit på'}, i samma färger som länderna. Tryck på en punkt för namn och resa.</p>
+    <div style="margin-top:12px">${cats.map(k => { const l = byCat(k); return l.length ? `<div class="cl"><i style="background:${catColor(k)};${k === 'M' ? 'border:2px dashed #6b7a80' : ''}"></i><span><b>${esc(catLabel(k, sel))} (${l.length}):</b> ${l.map(cc => `${flag(cc)} ${esc(cName(cc))}${who(cc)}`).join(', ')}</span></div>` : ''; }).join('') || '<div class="empty">Lägg till platser i en resa så färgas länderna här.</div>'}</div></div>`;
+  bindPersonFilter(main);
   if (!window.maplibregl) { $('#wmapbox').innerHTML = '<div class="mapmsg">Kartan behöver nät första gången.</div>'; return; }
   if (wmap) { try { wmap.remove(); } catch (e) {} wmap = null; wReady = false; }
   {
@@ -845,91 +951,143 @@ function viewVarlden(main) {
 }
 function paintWorld() {
   if (!wReady || !countries) return;
-  const { cat } = visited();
-  countries.features.forEach(f => { const c = cat(f.properties.cc); f.properties.cat = c || ''; f.properties.col = c ? (c === 'M' ? '#ffffff' : catColor(c)) : null; });
+  const sel = selIds(), { C, V } = visitData();
+  countries.features.forEach(f => { const c = catFor(C.get(f.properties.cc), V.get(f.properties.cc), sel); f.properties.cat = c || ''; f.properties.col = c ? catColor(c) : null; });
   wmap.getSource('c').setData(countries);
-  if (wmap.getSource('pl')) wmap.getSource('pl').setData(fc(placePoints()));
+  if (wmap.getSource('pl')) wmap.getSource('pl').setData(fc(placePoints(sel)));
 }
-function placePoints() {
+function placePoints(sel) {
   const P = new Map(), key = (lat, lon) => lat.toFixed(2) + ',' + lon.toFixed(2);
-  const allLabel = S.members.length > 2 ? 'Alla' : 'Båda';
   const add = (name, lat, lon, via, tr, trip) => {
     const k = key(lat, lon);
-    if (!P.has(k)) P.set(k, { name, lat, lon, all: false, ids: new Set(), visited: false, trips: new Map() });
+    if (!P.has(k)) P.set(k, { name, lat, lon, vis: new Set(), vias: new Set(), trips: new Map(), named: false });
     const p = P.get(k);
-    if (!p.trips.has(trip)) p.trips.set(trip, { all: false, ids: new Set(), via: false, visited: false });
+    if (!p.trips.has(trip)) p.trips.set(trip, { vis: new Set(), via: false });
     const t = p.trips.get(trip);
-    if (via) { t.via = true; return; }
-    p.visited = true; t.visited = true; p.name = name;
-    if (isAll(tr)) { p.all = true; t.all = true; } else tr.forEach(id => { p.ids.add(id); t.ids.add(id); });
+    if (via) { t.via = true; tr.forEach(id => p.vias.add(id)); return; }
+    if (!p.named) { p.name = name; p.named = true; }
+    tr.forEach(id => { p.vis.add(id); t.vis.add(id); });
   };
   for (const t of trips()) for (const s of stopsOf(t.id)) {
-    if (hasPos(s)) add(s.data.name, s.data.lat, s.data.lon, false, s.data.travelers || [], t.data.title);
-    for (const v of s.data.via || []) if (v.lat != null) add(v.name, v.lat, v.lon, true, [], t.data.title);
+    const tr = travelersOf(s.data.travelers);
+    if (hasPos(s)) add(s.data.name, s.data.lat, s.data.lon, false, tr, t.data.title);
+    for (const v of s.data.via || []) if (v.lat != null) add(v.name, v.lat, v.lon, true, tr, t.data.title);
   }
-  const whoOf = x => !x.visited ? 'mellanlandning' : x.all || (S.members.length > 1 && S.members.every(m => x.ids.has(m.user_id))) ? allLabel : [...x.ids].map(memberName).join(' och ') || allLabel;
-  return [...P.values()].map(p => {
-    let cat = 'M';
-    if (p.visited) { const idx = S.members.findIndex(m => p.ids.has(m.user_id)); cat = p.all || (S.members.length > 1 && S.members.every(m => p.ids.has(m.user_id))) || idx < 0 || p.ids.size > 1 ? 'B' : 'm' + idx; }
-    const info = [...p.trips.entries()].map(([trip, x]) => `${esc(trip)}: <b>${esc(whoOf(x))}</b>`).join('<br>');
-    return { type: 'Feature', properties: { name: p.name, via: cat === 'M', col: cat === 'M' ? '#ffffff' : catColor(cat), info }, geometry: { type: 'Point', coordinates: [p.lon, p.lat] } };
-  });
+  const all = allIds();
+  const whoOf = x => !x.vis.size ? 'mellanlandning' : all.length > 1 && all.every(id => x.vis.has(id)) ? allLabel() : [...x.vis].map(personName).join(', ');
+  const out = [];
+  for (const p of P.values()) {
+    const cat = catFor(p.vis.size ? p.vis : null, p.vias, sel); if (!cat) continue;
+    const info = [...p.trips.entries()].map(([trip, x]) => `${esc(trip)}: <b>${esc(persons().length > 1 || !x.vis.size ? whoOf(x) : 'besökt')}</b>`).join('<br>');
+    out.push({ type: 'Feature', properties: { name: p.name, via: cat === 'M', col: catColor(cat), info }, geometry: { type: 'Point', coordinates: [p.lon, p.lat] } });
+  }
+  return out;
 }
 
 function viewTopp(main) {
+  const sel = selIds();
   const years = [...new Set(ofKind('stop').map(s => (s.data.date || '').slice(0, 4)).filter(Boolean))].sort().reverse();
   const yr = viewTopp.year || '';
   const inYear = s => !yr || (s.data.date || '').startsWith(yr);
-  const all = trips().flatMap(t => legs(t).map(l => ({ ...l, t }))).filter(l => inYear(l.b));
+  const all = trips().flatMap(t => legs(t).map(l => ({ ...l, t }))).filter(l => inYear(l.b) && travelersOf(l.tr).some(id => sel.includes(id)));
   const perMode = {}; all.forEach(l => perMode[l.mode] = (perMode[l.mode] || 0) + l.km);
   const maxMode = Math.max(1, ...Object.values(perMode));
-  const mem = S.members.map(m => {
-    const ls = all.filter(l => travelersOf(l.tr).includes(m.user_id));
-    const cs = new Set(); const days = new Set();
-    trips().forEach(t => stopsOf(t.id).filter(inYear).forEach(s => { if (travelersOf(s.data.travelers).includes(m.user_id)) { if (s.data.cc) cs.add(s.data.cc); if (s.data.date) days.add(s.data.date); } }));
-    trips().forEach(t => { const ds = stopsOf(t.id).filter(s => inYear(s) && s.data.date && travelersOf(s.data.travelers).includes(m.user_id)).map(s => s.data.date).sort(); if (ds.length > 1) for (let d = new Date(ds[0]); d <= new Date(ds[ds.length - 1]); d.setDate(d.getDate() + 1)) days.add(d.toISOString().slice(0, 10)); });
-    return { m, km: ls.reduce((s, l) => s + l.km, 0), countries: cs.size, days: days.size, trips: new Set(ls.map(l => l.t.id)).size };
-  });
+  const stat = id => {
+    const ls = all.filter(l => travelersOf(l.tr).includes(id));
+    const cs = new Set(), days = new Set(), tr = new Set();
+    trips().forEach(t => {
+      const st = stopsOf(t.id).filter(s => inYear(s) && travelersOf(s.data.travelers).includes(id));
+      if (st.length) tr.add(t.id);
+      st.forEach(s => { if (s.data.cc) cs.add(s.data.cc); if (s.data.date) days.add(s.data.date); });
+      const ds = st.filter(s => s.data.date).map(s => s.data.date).sort();
+      if (ds.length > 1) for (let d = new Date(ds[0]); d <= new Date(ds[ds.length - 1]); d.setDate(d.getDate() + 1)) days.add(d.toISOString().slice(0, 10));
+    });
+    return { id, km: ls.reduce((a, l) => a + l.km, 0), countries: cs.size, days: days.size, trips: tr.size };
+  };
+  const stats = sel.map(stat);
+  const metrics = [['countries', 'Länder'], ['days', 'Resdagar'], ['trips', 'Resor'], ['km', 'Kilometer']];
   const longest = [...all].sort((a, b) => b.km - a.km).slice(0, 5);
   const viaC = {}; all.forEach(l => l.via.forEach(v => viaC[v.name] = (viaC[v.name] || 0) + 1));
   const vias = Object.entries(viaC).sort((a, b) => b[1] - a[1]).slice(0, 5);
-  const placeC = {}; trips().forEach(t => new Set(stopsOf(t.id).filter(inYear).map(s => s.data.name)).forEach(n => placeC[n] = (placeC[n] || 0) + 1));
+  const placeC = {}; trips().forEach(t => new Set(stopsOf(t.id).filter(s => inYear(s) && travelersOf(s.data.travelers).some(id => sel.includes(id))).map(s => s.data.name)).forEach(n => placeC[n] = (placeC[n] || 0) + 1));
   const places = Object.entries(placeC).filter(p => p[1] > 1).sort((a, b) => b[1] - a[1]).slice(0, 5);
-  main.innerHTML = `<div class="pad">
+  const statCard = stats.length === 1
+    ? `<section class="card"><div class="kpis" style="grid-template-columns:repeat(2,minmax(0,1fr))">${metrics.map(([k, l]) => `<div class="kpi" style="background:${personColor(stats[0].id)}"><b>${k === 'km' ? nf(stats[0][k]) : stats[0][k]}</b><span>${l}</span></div>`).join('')}</div></section>`
+    : `<section class="card"><h3>Topplista</h3><div class="ranks">${metrics.map(([k, l]) => `<div><div class="small" style="font-weight:800;margin-bottom:2px">${l}</div>${[...stats].sort((a, b) => b[k] - a[k]).map((x, i) => `<div class="spread" style="padding:2px 0;font-size:14px"><span>${i + 1}. <span class="dot" style="background:${personColor(x.id)}"></span>${esc(personName(x.id))}</span><span class="num">${k === 'km' ? nf(x[k]) : x[k]}</span></div>`).join('')}</div>`).join('')}</div></section>`;
+  main.innerHTML = `<div class="pad">${personFilter()}
     <div class="seg" id="yrs" style="margin-bottom:12px"><button data-y="" class="${yr ? '' : 'on'}">Alla år</button>${years.slice(0, 4).map(y => `<button data-y="${y}" class="${yr === y ? 'on' : ''}">${y}</button>`).join('')}</div>
-    <section class="card"><h3>${S.members.map(m => esc(m.name)).join(' mot ')}</h3><div class="tbl" style="grid-template-columns:minmax(0,1fr) ${S.members.map(() => '76px').join(' ')};margin-top:8px">
-      <span></span>${mem.map(x => `<span class="num" style="font-weight:800;color:${memberColor(x.m.user_id)}">${esc(x.m.name)}</span>`).join('')}
-      <span>Länder</span>${mem.map(x => `<span class="num">${x.countries}</span>`).join('')}
-      <span>Resdagar</span>${mem.map(x => `<span class="num">${x.days}</span>`).join('')}
-      <span>Resor</span>${mem.map(x => `<span class="num">${x.trips}</span>`).join('')}
-      <span>Kilometer</span>${mem.map(x => `<span class="num">${nf(x.km)}</span>`).join('')}</div></section>
+    ${statCard}
     <section class="card bars"><h3>Kilometer per färdmedel</h3>${Object.entries(perMode).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="r"><span>${MODES[k] ? MODES[k].n : k}</span><i style="width:${Math.max(2, v / maxMode * 100)}%;background:${(MODES[k] || MODES.bil).c}"></i><span class="num">${nf(v)} km</span></div>`).join('') || '<p class="mute small">Inga etapper ännu.</p>'}</section>
     <section class="card"><h3>Längsta etapperna</h3>${longest.map((l, i) => `<div class="spread" style="padding:5px 0;font-size:14px"><span><b>${i + 1}.</b> ${esc(l.a.data.name)} → ${esc(l.b.data.name)} <span class="small mute">${esc(l.m.n)}${l.via.length ? ' via ' + esc(l.via.map(v => v.name).join(', ')) : ''}</span></span><span class="num">${nf(l.km)} km</span></div>`).join('') || '<p class="mute small">Inga etapper ännu.</p>'}</section>
     ${vias.length ? `<section class="card"><h3>Flest mellanlandningar</h3><p class="small mute" style="margin:2px 0 6px">Räknas inte som besökta länder</p>${vias.map(([n, c]) => `<div class="spread" style="font-size:14px;padding:3px 0"><span>${esc(n)}</span><span class="num">×${c}</span></div>`).join('')}</section>` : ''}
     ${places.length ? `<section class="card"><h3>Mest återbesökta platser</h3>${places.map(([n, c]) => `<div class="spread" style="font-size:14px;padding:3px 0"><span>${esc(n)}</span><span class="num">${c} resor</span></div>`).join('')}</section>` : ''}
   </div>`;
+  bindPersonFilter(main);
   $('#yrs').onclick = e => { const b = e.target.closest('[data-y]'); if (b) { viewTopp.year = b.dataset.y; render(); } };
 }
-
-/* ---------------- mer ---------------- */
 function viewMer(main) {
   const me = S.members.find(m => m.user_id === S.user.id);
+  const hasRoles = S.members.some(m => m.role !== undefined), admin = me && me.role === 'admin';
+  const link = `${location.origin}${location.pathname}#join-${S.joinCode}`;
   main.innerHTML = `<div class="pad">
-    <section class="card"><h3>Ditt namn</h3><div class="row" style="margin-top:8px"><input id="myname" value="${esc(me ? me.name : '')}" style="flex:1"><button id="savename">Spara</button></div></section>
+    <section class="card"><div class="spread"><h3>Personer</h3><button class="sm" id="padd">+ Person</button></div>
+      <p class="small mute" style="margin:4px 0 6px">Alla som brukar resa med, även barn utan eget konto. Tryck för att ändra namn och färg.</p>
+      ${persons().map(p => { const m = p.data.user_id && S.members.find(x => x.user_id === p.data.user_id); return `<button class="prow" data-p="${p.id}"><span class="dot" style="background:${p.data.color}"></span><span style="flex:1;text-align:left">${esc(p.data.name)}${p.data.user_id === S.user.id ? ' <span class="mute">(du)</span>' : ''}</span><span class="small mute">${p.data.user_id ? (m && m.role === 'admin' ? 'admin' : m ? 'konto' : 'konto borttaget') : 'utan konto'}</span></button>`; }).join('')}</section>
+    <section class="card"><h3>Bjud in</h3><p class="small mute" style="margin:4px 0 8px">Skicka länken till den som ska vara med. Hen skapar ett konto och hamnar direkt i dagboken.</p>
+      <div class="row"><button class="pri" id="share">Dela inbjudan</button><span class="small">Kod: <b style="letter-spacing:2px">${esc(S.joinCode || '…')}</b></span>${admin ? '<button class="sm" id="newcode">Ny kod</button>' : ''}</div>
+      ${!hasRoles ? '<p class="small" style="color:#8a4a00;margin:8px 0 0">Kör uppdateringen schema_v2.sql i Supabase för att kunna ta bort medlemmar och byta kod.</p>' : ''}</section>
     <section class="card"><h3>Hem</h3><p class="small mute" style="margin:4px 0 8px">Används som startplats för nya resor och för knappen Hemresa.</p>${homeOf() ? `<div class="note" style="margin:0 0 8px">${flag(homeOf().cc)} <b>${esc(homeOf().name)}</b></div>` : ''}<div id="homesb"></div></section>
-    <section class="card"><h3>Vi som delar dagboken</h3>${S.members.map(m => `<div style="padding:4px 0"><span class="who" style="color:${memberColor(m.user_id)}">${esc(m.name)}</span></div>`).join('')}
-      <p class="small mute">Den du vill dela med installerar appen, skapar ett konto och väljer <b>Gå med med kod</b> med koden:</p>
-      <div class="row"><b style="font-size:24px;letter-spacing:3px">${esc(S.joinCode || '…')}</b><button class="sm" id="cp">Kopiera</button></div></section>
     <section class="card"><h3>Synk</h3><p class="small" style="margin:6px 0">${pendingCount()} ändringar väntar · ${S.lastSync ? 'senast ' + S.lastSync.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' }) : 'inte synkad ännu'}${S.syncErr ? `<br><span style="color:#b00020">${esc(S.syncErr)}</span>` : ''}</p><button id="syncnow">Synka nu</button></section>
     <section class="card"><h3>Säkerhetskopia</h3><p class="small mute" style="margin:6px 0">All text och alla platser som en fil. Bilderna ligger kvar i molnet.</p><button id="exp">Ladda ner kopia</button></section>
     <button id="lo" style="width:100%">Logga ut</button>
-    <p class="small mute" style="margin-top:16px">Karta © OpenFreeMap, OpenMapTiles, OpenStreetMap-bidragsgivare. Sökning: Photon. Rutter: FOSSGIS OSRM och BRouter.</p></div>`;
+    <p class="small mute" style="margin-top:16px">Karta © OpenFreeMap, OpenMapTiles, OpenStreetMap-bidragsgivare. Sökning: Photon. Rutter: FOSSGIS OSRM och BRouter. Flyg: adsbdb.</p></div>`;
+  main.querySelectorAll('.prow').forEach(b => b.onclick = () => personDlg(S.docs.get(b.dataset.p)));
+  $('#padd').onclick = () => personDlg(null);
+  $('#share').onclick = async () => {
+    if (!S.joinCode) return toast('Koden hämtas när du har nät');
+    const text = `Gå med i vår resdagbok: ${link}`;
+    try { if (navigator.share) { await navigator.share({ title: 'Resdagboken', text: 'Gå med i vår resdagbok', url: link }); return; } } catch (e) { if (e && e.name === 'AbortError') return; }
+    try { await navigator.clipboard.writeText(text); toast('Länken är kopierad'); } catch (e) { openDlg(`<h2>Inbjudan</h2><p>Kopiera länken och skicka den:</p><textarea readonly style="min-height:90px">${esc(text)}</textarea><div class="row end"><button data-close>Stäng</button></div>`); }
+  };
+  if ($('#newcode')) $('#newcode').onclick = () => confirmDlg('Byta inbjudningskod?', 'Gamla länkar och koder slutar fungera. De som redan är med påverkas inte.', 'Byt kod', async () => {
+    const { data, error } = await sb.rpc('new_join_code', { p_group: S.group }); if (error) return toast(navigator.onLine ? error.message : 'Kräver nät');
+    S.joinCode = data; await idbPut('kv', data, 'joinCode'); toast('Ny kod: ' + data); render();
+  });
   searchBox($('#homesb'), async p => { await saveDoc('home', { name: p.name, sub: p.sub, lat: p.lat, lon: p.lon, cc: p.cc }, S.user.id); toast('Hem är sparat'); render(); }, homeOf() ? 'Byt hem – sök ort eller adress' : 'Sök din hemort eller adress');
-  $('#savename').onclick = async () => { const n = $('#myname').value.trim(); if (!n) return; const { error } = await sb.from('members').update({ name: n }).eq('group_id', S.group).eq('user_id', S.user.id); if (error) return toast(navigator.onLine ? error.message : 'Kräver nät'); await loadMembers(); toast('Sparat'); render(); };
-  $('#cp').onclick = async () => { try { await navigator.clipboard.writeText(S.joinCode); toast('Koden är kopierad'); } catch (e) { toast(S.joinCode); } };
   $('#syncnow').onclick = async () => { await sync(); render(); };
   $('#exp').onclick = () => { const data = JSON.stringify({ exported: new Date().toISOString(), docs: [...S.docs.values()].filter(live).map(d => ({ id: d.id, kind: d.kind, data: d.data })) }, null, 1); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([data], { type: 'application/json' })); a.download = `resdagboken-${today()}.json`; a.click(); };
   $('#lo').onclick = () => confirmDlg('Logga ut?', 'Ändringar som inte är synkade försvinner från den här telefonen.', 'Logga ut', logout);
+}
+function personDlg(p) {
+  const used = persons().map(x => x.data.color);
+  const D = p ? { ...p.data } : { name: '', color: PERSON_COLORS.find(c => !used.includes(c)) || PERSON_COLORS[0] };
+  const member = p && p.data.user_id ? S.members.find(m => m.user_id === p.data.user_id) : null;
+  const me = S.members.find(m => m.user_id === S.user.id), admin = me && me.role === 'admin';
+  const other = p && p.data.user_id && p.data.user_id !== S.user.id && member;
+  openDlg(`<h2>${p ? 'Ändra person' : 'Ny person'}</h2>
+    <label for="pn">Namn</label><input id="pn" value="${esc(D.name)}" placeholder="t.ex. Max">
+    <label>Färg</label><div class="chips" id="pc">${PERSON_COLORS.map(c => `<button type="button" class="swatch${c === D.color ? ' on' : ''}" data-c="${c}" style="background:${c}" aria-label="Välj färg"></button>`).join('')}</div>
+    ${p ? `<p class="small mute" style="margin:10px 0 0">${p.data.user_id ? 'Har eget konto' + (member && member.role === 'admin' ? ' · administratör' : '') : 'Utan eget konto. Om personen senare skaffar ett konto och går med via inbjudan kan hen välja sig själv här.'}</p>` : ''}
+    <div class="row end" style="margin-top:16px">
+      ${p && !p.data.user_id ? '<button type="button" id="pdel">Ta bort</button>' : ''}
+      ${other && admin ? `<button type="button" class="sm" id="padm">${member.role === 'admin' ? 'Ta bort admin' : 'Gör till admin'}</button><button type="button" class="sm" id="prm">Ta bort från dagboken</button>` : ''}
+      <button type="button" data-close>Avbryt</button><button class="pri" id="pok">Spara</button></div>`);
+  $('#pc').onclick = e => { const x = e.target.closest('[data-c]'); if (!x) return; D.color = x.dataset.c; $('#pc').querySelectorAll('.swatch').forEach(y => y.classList.toggle('on', y === x)); };
+  $('#pok').onclick = async () => {
+    const name = $('#pn').value.trim(); if (!name) return toast('Skriv ett namn');
+    await saveDoc('person', { ...D, name, order: p ? (p.data.order ?? persons().length) : persons().length }, p && p.id);
+    if (p && p.data.user_id === S.user.id) { sb.from('members').update({ name }).eq('group_id', S.group).eq('user_id', S.user.id).then(() => loadMembers()); }
+    closeDlg(); render();
+  };
+  if ($('#pdel')) $('#pdel').onclick = () => confirmDlg(`Ta bort ${p.data.name}?`, 'Personen försvinner från listor och statistik. Resorna finns kvar.', 'Ta bort', async () => { await deleteDoc(p.id); render(); });
+  if ($('#prm')) $('#prm').onclick = () => confirmDlg(`Ta bort ${p.data.name} från dagboken?`, 'Kontot förlorar åtkomst. Personen finns kvar i resorna som person utan konto.', 'Ta bort', async () => {
+    const { error } = await sb.rpc('remove_member', { p_group: S.group, p_user: p.data.user_id }); if (error) return toast(navigator.onLine ? error.message : 'Kräver nät');
+    await saveDoc('person', { user_id: null }, p.id); await loadMembers(); render();
+  });
+  if ($('#padm')) $('#padm').onclick = async () => {
+    const { error } = await sb.rpc('set_member_role', { p_group: S.group, p_user: p.data.user_id, p_role: member.role === 'admin' ? 'member' : 'admin' }); if (error) return toast(navigator.onLine ? error.message : 'Kräver nät');
+    await loadMembers(); closeDlg(); render();
+  };
 }
 
 /* ---------------- start ---------------- */
@@ -953,6 +1111,7 @@ if ('serviceWorker' in navigator) {
   }).catch(() => {});
 }
 
+{ const jm = location.hash.match(/^#join-([A-Za-z0-9]+)/); if (jm) { try { localStorage.setItem('rdJoin', jm[1].toUpperCase()); } catch (e) {} history.replaceState(null, '', location.pathname + location.search); } }
 (async function boot() {
   try {
     for (const d of await idbAll('docs')) S.docs.set(d.id, d);
